@@ -1,0 +1,72 @@
+{
+  "owner_uids": {
+    "description": "允许触发的 QQ 号（英文逗号分隔）",
+    "type": "string",
+    "default": "1792559819"
+  },
+  "bili_executable": {
+    "description": "bili-cli 可执行文件（PATH 里有就写 bili）",
+    "type": "string",
+    "default": "bili"
+  },
+  "ai_bot_data_dir": {
+    "description": "B站 AI Bot 数据目录，留空自动找 data/plugin_data/astrbot_plugin_bilibili_ai_bot",
+    "type": "string",
+    "default": ""
+  },
+  "recent_limit": {
+    "description": "「最近刷到什么」最多列几条（随机上限）",
+    "type": "int",
+    "default": 10
+  },
+  "recent_limit_min": {
+    "description": "「最近刷到什么」最少列几条（默认 5，每次在 min~max 之间随机）",
+    "type": "int",
+    "default": 5
+  },
+  "subtitle_max_chars": {
+    "description": "字幕最多截取多少字",
+    "type": "int",
+    "default": 1800
+  },
+  "command_timeout": {
+    "description": "单条 bili 命令超时（秒）",
+    "type": "int",
+    "default": 90
+  },
+  "enable_card_share": {
+    "description": "解析 QQ 分享卡片（链接分享暂不支持）",
+    "type": "bool",
+    "default": true
+  },
+  "enable_watch_trigger": {
+    "description": "允许说「刷视频/刷B站/看视频」触发 B站 AI Bot 刷一轮",
+    "type": "bool",
+    "default": true
+  },
+  "watch_words": {
+    "description": "额外触发词（逗号分隔）",
+    "type": "string",
+    "default": ""
+  },
+  "watch_min_gap": {
+    "description": "两次口令触发最小间隔（秒，默认 180=3 分钟）",
+    "type": "int",
+    "default": 180
+  },
+  "watch_memory_hours": {
+    "description": "「刷片回忆」保留/回看多少小时的详细解析（默认 24）",
+    "type": "int",
+    "default": 24
+  },
+  "recent_list_max_chars": {
+    "description": "问「刷到什么」时，句子超过多少字就不直接甩清单（默认 12）",
+    "type": "int",
+    "default": 12
+  },
+  "list_repeat_window": {
+    "description": "清单重复保护：多少秒内再问「刷到什么」不再重复发（默认 600）",
+    "type": "int",
+    "default": 600
+  }
+}

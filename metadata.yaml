@@ -2,12 +2,13 @@
 display_name: B站动态记忆桥2
 short_desc: 读 B站 AI Bot 的看片记录，把 B站 接进 QQ。
 desc: 分享卡片解析、最近刷片清单、第几个讲了什么、口令触发刷一轮；数据源是 B站 AI Bot 的 watch_log.json，不依赖任何外部刷B站工具。
-version: 1.2.7
+version: 1.2.8
 author: paopao
 repo: https://github.com/zuoyu123654/astrbot_plugin_bili_bridge2
 astrbot_version: ">=4.17"
 support_platforms:
   - aiocqhttp
+
 
 
 

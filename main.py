@@ -21,6 +21,7 @@ import os
 import random
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -176,7 +177,53 @@ class BiliBridge2(Star):
         return raw or "bili"
 
     # ── 看片记录 ────────────────────────────────────────────────────────
+    def _ai_bot_db(self) -> Path:
+        return self._ai_bot_dir() / "bilibot.sqlite3"
+
+    def _watch_records_from_db(self) -> list[dict]:
+        """B站 AI Bot 2.0+ 把看片记录搬进了 bilibot.sqlite3 的 activity_log 表。"""
+
+        db = self._ai_bot_db()
+        if not db.is_file():
+            return []
+        try:
+            con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
+            rows = list(con.execute(
+                "select data from activity_log where kind='watch' order by id"))
+            con.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[Bridge2] 读 bilibot.sqlite3 看片记录失败：%s", exc)
+            return []
+        records = []
+        for (raw,) in rows:
+            try:
+                item = json.loads(raw)
+            except Exception:  # noqa: BLE001
+                continue
+            if not isinstance(item, dict) or not item.get("bvid"):
+                continue
+            try:
+                score = float(item.get("score") or 0)
+            except (TypeError, ValueError):
+                score = 0.0
+            records.append({
+                "bvid": item["bvid"],
+                "title": item.get("title") or "",
+                "up": item.get("up_name") or "",
+                "time": item.get("time") or "",
+                "score": score,
+                "summary": item.get("content_summary") or "",
+                "review": item.get("review") or "",
+                "mood": item.get("mood") or "",
+                "round": item.get("round") or "",
+            })
+        records.sort(key=lambda r: str(r.get("time") or ""), reverse=True)
+        return records
+
     def _watch_records(self) -> list[dict]:
+        records = self._watch_records_from_db()
+        if records:
+            return records
         path = self._ai_bot_dir() / "watch_log.json"
         if not path.is_file():
             logger.info("[Bridge2] 没有 watch_log.json：%s", path)
@@ -300,9 +347,59 @@ class BiliBridge2(Star):
         )
         return random.choice(templates)
 
+    def _cached_detail_from_db(self, bvid: str, hours: int = 24) -> str:
+        """2.0+ 的视频解析存在 keyed_json(video_memory)，时间用 activity_log 里那次看片的记录。"""
+
+        db = self._ai_bot_db()
+        if not db.is_file():
+            return ""
+        try:
+            con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
+            row = con.execute(
+                "select json_extract(data,'$.time') from activity_log "
+                "where kind='watch' and json_extract(data,'$.bvid')=? "
+                "order by id desc limit 1", (bvid,)).fetchone()
+            when = row[0] if row and row[0] else ""
+            mem = con.execute(
+                "select data from keyed_json where kind='video_memory' and key=? "
+                "order by id desc limit 1", (bvid,)).fetchone()
+            con.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[Bridge2] 读缓存解析失败：%s", exc)
+            return ""
+        if not mem:
+            return ""
+        try:
+            item = json.loads(mem[0])
+        except Exception:  # noqa: BLE001
+            return ""
+        if not isinstance(item, dict):
+            return ""
+        try:
+            ts = datetime.strptime(str(when)[:16], "%Y-%m-%d %H:%M").timestamp()
+        except Exception:  # noqa: BLE001
+            return ""
+        if time.time() - ts > max(1, hours) * 3600:
+            return ""
+        analysis = str(item.get("analysis") or "").strip()
+        if not analysis:
+            return ""
+        title = item.get("title") or ""
+        up = item.get("owner_name") or ""
+        return (
+            f"【B站视频素材 {bvid}·缓存】\n"
+            f"— 标题：{title}（{up}）\n"
+            f"— 看过时间：{when}\n"
+            f"— 内容（当时的分析，可直接用）：\n{analysis[:1600]}\n"
+            "用法：保持人设用你自己的话说，别复述标题。"
+        )
+
     def _cached_detail(self, bvid: str, hours: int = 24) -> str:
         """近 N 小时看过的视频，直接从 video_memory.json 拿当时的完整解析，省一次 bili-cli。"""
 
+        detail = self._cached_detail_from_db(bvid, hours)
+        if detail:
+            return detail
         path = self._ai_bot_dir() / "video_memory.json"
         if not path.is_file():
             return ""
@@ -465,11 +562,26 @@ class BiliBridge2(Star):
         try:
             meta = self.context.get_registered_star("astrbot_plugin_bilibili_ai_bot")
             inst = getattr(meta, "star_cls", None)
-            if inst is not None and hasattr(inst, "_run_proactive"):
+            if inst is not None and (
+                hasattr(inst, "_run_proactive") or hasattr(inst, "proactive_browse")
+            ):
                 return inst
         except Exception as exc:  # noqa: BLE001
             logger.info("[Bridge2] 拿不到 AI Bot 实例：%s", exc)
         return None
+
+    @staticmethod
+    def _ai_bot_busy(inst) -> bool:
+        if inst is None:
+            return False
+        acts = getattr(inst, "activities", None)
+        try:
+            if acts is not None and hasattr(acts, "_activity_busy"):
+                return bool(acts._activity_busy("proactive"))
+        except Exception:  # noqa: BLE001
+            pass
+        task = getattr(inst, "_proactive_task", None)
+        return task is not None and not task.done()
 
     def _attach_watch_note(self, event: AstrMessageEvent, status: str) -> None:
         """把「刷一轮」的后台情况挂到事件上，措辞交给模型（桥1 的做法）。"""
@@ -518,8 +630,32 @@ class BiliBridge2(Star):
         except Exception:  # noqa: BLE001
             pass
 
-    def _pushed_records(self) -> list[dict]:
-        """最近一次推给主人的那一批，按 QQ 消息里的顺序。"""
+    def _last_push_bvids(self) -> list[str]:
+        """最近一批推送：2.0+ 看数据库里的推荐账本，老版本看 owner_last_push.json。"""
+
+        db = self._ai_bot_db()
+        if db.is_file():
+            try:
+                con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
+                row = con.execute(
+                    "select data from keyed_json where kind='state' "
+                    "and key='owner_recommend_log.json' order by id desc limit 1").fetchone()
+                con.close()
+                ledger = json.loads(row[0]) if row and row[0] else {}
+                if isinstance(ledger, dict) and ledger:
+                    entries = [
+                        (str(v.get("time") or ""), bvid)
+                        for bvid, v in ledger.items()
+                        if isinstance(v, dict) and bvid
+                    ]
+                    if entries:
+                        entries.sort(reverse=True)
+                        newest = entries[0][0]
+                        bvids = [bvid for when, bvid in entries if when == newest]
+                        if bvids:
+                            return bvids
+            except Exception:  # noqa: BLE001
+                pass
 
         path = self._ai_bot_dir() / "owner_last_push.json"
         if not path.is_file():
@@ -528,7 +664,12 @@ class BiliBridge2(Star):
             data = json.loads(path.read_bytes().decode("utf-8-sig"))
         except Exception:  # noqa: BLE001
             return []
-        bvids = [str(b) for b in (data.get("bvids") or []) if b]
+        return [str(b) for b in (data.get("bvids") or []) if b]
+
+    def _pushed_records(self) -> list[dict]:
+        """最近一次推给主人的那一批，按 QQ 消息里的顺序。"""
+
+        bvids = self._last_push_bvids()
         if not bvids:
             return []
         by_bvid = {r["bvid"]: r for r in self._watch_records()}
@@ -732,8 +873,7 @@ class BiliBridge2(Star):
                 hit = ""
             if hit:
                 inst = self._ai_bot_instance()
-                task = getattr(inst, "_proactive_task", None) if inst else None
-                if task is not None and not task.done():
+                if self._ai_bot_busy(inst):
                     logger.info("[Bridge2] 上一轮还在跑，先不叠加：%s", hit)
                     self._attach_watch_note(event, "busy")
                     self._suppress_bili_hook(event)
@@ -752,14 +892,27 @@ class BiliBridge2(Star):
                     try:
                         count = inst._manual_watch_count()
                     except Exception:  # noqa: BLE001
-                        count = 1
-                    # 必须挂到 AI Bot 自己的 _proactive_task 上，否则它的口令钩子看不到
-                    # 「正在跑」，会在同一条消息上再开一轮
-                    inst._proactive_task = asyncio.create_task(inst._run_proactive(max_watch=count))
-                    logger.info("[Bridge2] 口令直接触发 AI Bot 刷一轮：%s 个", count)
-                    self._attach_watch_note(event, "started")
-                    self._suppress_bili_hook(event)
-                    return
+                        count = random.randint(3, 5)
+                    started = False
+                    try:
+                        acts = getattr(inst, "activities", None)
+                        if acts is not None and hasattr(acts, "_run_activity_now"):
+                            started = acts._run_activity_now("proactive", max_watch=count) is not None
+                    except Exception as exc:  # noqa: BLE001
+                        logger.info("[Bridge2] 走 activities 触发失败，改用任务方式：%s", exc)
+                    if not started:
+                        entry = getattr(inst, "proactive_browse", None) or inst
+                        try:
+                            task = asyncio.create_task(entry._run_proactive(max_watch=count))
+                            inst._proactive_task = task
+                            started = True
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning("[Bridge2] 触发刷一轮失败：%s", exc)
+                    if started:
+                        logger.info("[Bridge2] 口令直接触发 AI Bot 刷一轮：%s 个", count)
+                        self._attach_watch_note(event, "started")
+                        self._suppress_bili_hook(event)
+                        return
                 self._last_watch = time.time()
                 # 不篡改用户消息；改成挂一条临时附加内容，模型照样看得到
                 try:

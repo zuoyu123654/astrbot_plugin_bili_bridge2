@@ -235,6 +235,71 @@ class BiliBridge2(Star):
             lines.append(f"{i}. {title}{up} · {r['bvid']}")
         return "最近刷到的：\n" + "\n".join(lines) + "\n\n想问哪条直接说「第几个讲了什么」。"
 
+    @classmethod
+    def _cn_count(cls, n: int) -> str:
+        words = "零一二三四五六七八九十"
+        if 0 <= n <= 10:
+            return words[n]
+        return str(n)
+
+    @classmethod
+    def _approx_when(cls, value) -> str:
+        """把 2026-11-08 02:55 说成「今天凌晨三点左右」这种人话。"""
+
+        try:
+            stamp = datetime.strptime(str(value)[:16], "%Y-%m-%d %H:%M")
+        except Exception:  # noqa: BLE001
+            return "刚才"
+        hour, minute = stamp.hour, stamp.minute
+        if minute >= 40:
+            hour = (hour + 1) % 24
+        elif minute <= 20:
+            pass
+        else:
+            minute = 30
+        day = stamp.date()
+        today = datetime.now().date()
+        delta = (today - day).days
+        if delta == 0:
+            day_word = "今天"
+        elif delta == 1:
+            day_word = "昨天"
+        elif delta == 2:
+            day_word = "前天"
+        else:
+            day_word = f"{stamp.month} 月 {stamp.day} 号"
+        if hour < 5:
+            part = "凌晨"
+        elif hour < 8:
+            part = "早上"
+        elif hour < 11:
+            part = "上午"
+        elif hour < 13:
+            part = "中午"
+        elif hour < 17:
+            part = "下午"
+        elif hour < 19:
+            part = "傍晚"
+        elif hour < 23:
+            part = "晚上"
+        else:
+            part = "深夜"
+        clock = "十二点" if hour % 12 == 0 else f"{cls._cn_count(hour % 12)}点多"
+        return f"{day_word}{part}{clock}"
+
+    @classmethod
+    def _casual_last_round(cls, records) -> str:
+        """一句人话，不报分秒、不像报表。"""
+
+        when = cls._approx_when(records[-1].get("time") if records else "")
+        n = cls._cn_count(len(records)) if records else "零"
+        templates = (
+            f"{when}刷的，也就{n}条。",
+            f"{when}吧，没刷多少，{n}条。",
+            f"我想想……{when}刷的，{n}条。",
+        )
+        return random.choice(templates)
+
     def _cached_detail(self, bvid: str, hours: int = 24) -> str:
         """近 N 小时看过的视频，直接从 video_memory.json 拿当时的完整解析，省一次 bili-cli。"""
 
@@ -753,11 +818,11 @@ class BiliBridge2(Star):
                 return
             if not content_ask:
                 await asyncio.sleep(random.uniform(1.0, 2.0))
-                logger.info("[Bridge2] 只问时间/有没有刷，回一句（%s）", when)
+
                 if last_round:
-                    yield event.plain_result(
-                        f"最近一轮在 {when}，一共 {len(last_round)} 个。"
-                    )
+                    reply = self._casual_last_round(last_round)
+                    logger.info("[Bridge2] 只问时间/有没有刷，回一句：%s", reply)
+                    yield event.plain_result(reply)
                 else:
                     yield event.plain_result("最近还没有看片记录（B站 AI Bot 还没刷过）。")
                 return
@@ -928,7 +993,7 @@ class BiliBridge2(Star):
         if not rounds:
             return
         last = rounds[-1]
-        when = last[-1].get("time") or "?"
+        when = self._approx_when(last[-1].get("time") or "")
         flat = [r for items in rounds for r in items][-10:]
         content_text = re.sub(r"什么时候|啥时候|几点|多久|多早", "", text)
         content_ask = bool(re.search(r"什么|啥|哪些|哪几个|哪条|讲了|内容|刷到", content_text))

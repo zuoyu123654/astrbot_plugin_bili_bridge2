@@ -1,4 +1,10 @@
-﻿## 1.2.8 — 2026-11-08
+﻿## 1.3.0 — 2026-11-09
+
+- 适配 B站 AI Bot 2.0：主数据源改为 `bilibot.sqlite3`（`activity_log` / `keyed_json`），旧 `watch_log.json` / `video_memory.json` / `owner_last_push.json` 仅作兜底。
+- 刷一轮改用 2.0 的 `activities._run_activity_now('proactive', max_watch=N)`，兼容旧 `_run_proactive`。
+- 手动触发数量由桥2 传随机 3~5（AI Bot 侧也补了同样的默认值）。
+
+## 1.2.8 — 2026-11-08
 
 - 不再改写 `event.message_str`：AI Bot 实例缺席时改用 `extra_user_content_parts` 注入「去刷一轮」的临时指令（没有 TextPart 的极端情况才退回改写）。
 
@@ -74,6 +80,7 @@
 
 - 首个版本：分享卡片解析、最近刷片清单、第几个视频讲了什么、
   说「刷视频」触发 B站 AI Bot 跑一轮；数据源为 `watch_log.json`。
+
 
 
 

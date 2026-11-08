@@ -761,17 +761,23 @@ class BiliBridge2(Star):
                     self._suppress_bili_hook(event)
                     return
                 self._last_watch = time.time()
-                directive = (
-                    "（现在就去刷一轮 B 站：立刻调用你的 bili_watch_videos 工具，"
-                    "不要先问、不要解释、不要复述这句括号；刷完按你自己的口气回一句。）"
-                )
-                # 写进消息本身，比附加内容更强 —— 模型一定会看到
-                event.message_str = directive
+                # 不篡改用户消息；改成挂一条临时附加内容，模型照样看得到
                 try:
-                    event.message_obj.message_str = directive
+                    event.set_extra("bridge2_watch_directive", True)
                 except Exception:  # noqa: BLE001
                     pass
-                logger.info("[Bridge2] 口令触发（已改写成指令）：%s", hit)
+                if TextPart is None:
+                    # 极端兼容：没有 TextPart 时只能退回改写消息
+                    directive = (
+                        "（现在就去刷一轮 B 站：立刻调用你的 bili_watch_videos 工具，"
+                        "不要先问、不要解释、不要复述这句括号；刷完按你自己的口气回一句。）"
+                    )
+                    event.message_str = directive
+                    try:
+                        event.message_obj.message_str = directive
+                    except Exception:  # noqa: BLE001
+                        pass
+                logger.info("[Bridge2] 口令触发（附加内容注入指令）：%s", hit)
                 return
 
         # ①.5 用户复述一遍「我说刷到什么」：这是重复要，别再列一次
@@ -953,6 +959,38 @@ class BiliBridge2(Star):
             logger.info("[Bridge2] 已挂上刷一轮说明（%s）", status)
         except Exception as exc:  # noqa: BLE001
             logger.info("[Bridge2] 挂刷一轮说明失败：%s", exc)
+
+    @filter.on_llm_request()
+    async def inject_watch_directive(self, event: AstrMessageEvent, req: ProviderRequest):
+        """AI Bot 实例缺席时，用临时附加内容告诉模型「现在去刷」，不改用户消息。"""
+
+        try:
+            wanted = bool(event.get_extra("bridge2_watch_directive"))
+        except Exception:  # noqa: BLE001
+            wanted = False
+        if not wanted:
+            return
+        if TextPart is None:
+            return
+        try:
+            part = TextPart(text=(
+                "（现在就去刷一轮 B 站：立刻调用你的 bili_watch_videos 工具，"
+                "不要先问、不要解释、不要复述这句括号；刷完按你自己的口气回一句。）"
+            ))
+            for attr in ("mark_as_temp", "make_as_temp"):
+                marker = getattr(part, attr, None)
+                if callable(marker):
+                    try:
+                        marked = marker()
+                        if marked is not None:
+                            part = marked
+                    except Exception:  # noqa: BLE001
+                        pass
+                    break
+            req.extra_user_content_parts.append(part)
+            logger.info("[Bridge2] 已挂上「去刷一轮」指令（附加内容）")
+        except Exception as exc:  # noqa: BLE001
+            logger.info("[Bridge2] 挂「去刷一轮」指令失败：%s", exc)
 
     @filter.on_llm_request()
     async def inject_recent_round(self, event: AstrMessageEvent, req: ProviderRequest):

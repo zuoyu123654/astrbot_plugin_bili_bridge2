@@ -51,9 +51,13 @@
 <AstrBot>\data\plugins\astrbot_plugin_bili_bridge2\        ← 插件代码
 <AstrBot>\data\config\astrbot_plugin_bili_bridge2_config.json   ← 配置
 <AstrBot>\data\plugin_data\astrbot_plugin_bilibili_ai_bot\      ← B站 AI Bot 数据（桥2 读取）
-    watch_log.json         每轮看了什么（时间/标题/BV/评分/摘要）
-    video_memory.json      每条视频的完整解析（按 BV，桥2 的 24h 缓存）
-    owner_last_push.json   最近一次推给主人的顺序（可选）
+    bilibot.sqlite3        ★ 2.0 起的主数据源：
+                             activity_log(kind='watch')    每轮看了什么
+                             keyed_json(kind='video_memory') 每条视频的完整解析（24h 缓存）
+                             keyed_json(state.owner_recommend_log.json) 推送顺序
+    watch_log.json         1.x 旧文件；2.0 只在升级时导入一次，桥2 仅作兜底
+    video_memory.json      同上，兜底用
+    owner_last_push.json   同上，兜底用
 ```
 
 `ai_bot_data_dir` 留空时桥2 自动找 `data/plugin_data/astrbot_plugin_bilibili_ai_bot`；

@@ -81,7 +81,7 @@ CN_NUM = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, 
 DETAIL_Q_RE = re.compile(r"(再|具体|详细|展开|细说|多说|深入|后来|然后呢|为什么|怎么回事)")
 
 
-@register(PLUGIN_NAME, "paopao", "把 B站 AI Bot 刷到的视频接进 QQ", "1.0.0")
+@register(PLUGIN_NAME, "paopao", "把 B站 AI Bot 刷到的视频接进 QQ", "1.2.6")
 class BiliBridge2(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
@@ -89,7 +89,19 @@ class BiliBridge2(Star):
         self._pending: dict[str, str] = {}
         self._cache_hit: dict[str, tuple[str, float]] = {}
         self._last_watch = 0.0
-        self._recent_path = Path(__file__).resolve().parent / "recent.json"
+        self._data_dir = self._plugin_data_dir()
+        try:
+            self._data_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        self._recent_path = self._data_dir / "recent.json"
+        legacy_recent = Path(__file__).resolve().parent / "recent.json"
+        if legacy_recent.is_file() and not self._recent_path.is_file():
+            try:
+                shutil.copy2(legacy_recent, self._recent_path)
+                logger.info("[Bridge2] 已把旧的 recent.json 迁到插件数据目录")
+            except OSError:
+                pass
 
     # ── 配置/工具 ────────────────────────────────────────────────────────
     def _owners(self) -> set[str]:
@@ -101,6 +113,16 @@ class BiliBridge2(Star):
             return str(event.get_sender_id()) in self._owners()
         except Exception:  # noqa: BLE001
             return False
+
+    def _plugin_data_dir(self) -> Path:
+        """插件运行数据统一放 data/plugin_data/<插件名>/，不写插件安装目录。"""
+
+        try:
+            from astrbot.core.star.star_tools import StarTools
+
+            return Path(StarTools.get_data_dir(PLUGIN_NAME))
+        except Exception:  # noqa: BLE001
+            return Path(__file__).resolve().parent.parent.parent / "plugin_data" / PLUGIN_NAME
 
     def _ai_bot_dir(self) -> Path:
         raw = str(self.config.get("ai_bot_data_dir") or "").strip()
@@ -366,7 +388,7 @@ class BiliBridge2(Star):
                 "comps": comps,
                 "chunks": [c[:1000] for c in self._collect_chunks(event) if c][:60],
             }
-            path = Path(__file__).resolve().parent / "card_debug.jsonl"
+            path = self._data_dir / "card_debug.jsonl"
             with path.open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
         except Exception as exc:  # noqa: BLE001

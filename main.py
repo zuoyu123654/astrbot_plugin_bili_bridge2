@@ -15,11 +15,14 @@
 from __future__ import annotations
 
 import asyncio
+import difflib
+import hashlib
 import html
 import json
 import os
 import random
 import re
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -27,7 +30,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +45,9 @@ except Exception:  # noqa: BLE001
     TextPart = None  # type: ignore[assignment]
 
 PLUGIN_NAME = "astrbot_plugin_bili_bridge2"
+# QQ 日记 → B站 记忆的同步（AstrBot 启动后跑一次；脚本路径可以改）
+DEFAULT_DIARY_SCRIPT = r"D:\app1\tools\sync_qq_diary.py"
+DEFAULT_DIARY_LOG = r"D:\app1\logs\qqdiary_sync.log"
 BV_RE = re.compile(r"(BV[0-9A-Za-z]{10})")
 # B站分享卡片里放的是短链（b23.tv / bili2233.cn），不带 BV，得跟一次 302 才拿得到
 SHORT_RE = re.compile(r"(?:https?://)?(?:b23\.tv|bili2233\.cn)/([0-9A-Za-z]{4,16})")
@@ -76,13 +82,22 @@ WATCH_BLOCKERS = (
 
 DEFAULT_WATCH_WORDS = ("刷视频", "刷b站", "刷B站", "看视频", "刷会儿b站")
 RECENT_Q_RE = re.compile(r"(最近|今天|刚才|刚刚).{0,6}(刷|看).{0,6}(什么|啥|哪些|视频|片子)")
+# 「刷的都啥」「看过的有哪些」这种没带时间词的说法，也得算问清单
+RECENT_Q_RE2 = re.compile(r"(?:刷|看)(?:的|过|了)(?:都)?(?:是)?(?:什么|啥|哪些|哪几个|哪几条)")
+# 问某条细节的说法：「X那条讲了什么」「X是啥意思」
+DETAIL_WORD_RE = re.compile(r"(讲|内容|什么|啥|意思|细节|怎么回事)")
+# 「你推过什么」「上周发给我哪些」——问推送历史，不是问最近刷片
+PUSH_RECALL_RE = re.compile(
+    r"(推|发|分享)(给|过|了)?(我|你)?(的)?(那些|什么|啥|哪些|几条|视频)"
+    r"|推过什么|推过哪些|推荐过什么|发过什么视频"
+)
 ORDINAL_RE = re.compile(r"第\s*([一二三四五六七八九十\d]{1,2})\s*(?:个|条|支|部)?")
 CN_NUM = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
 # 「再具体讲讲 / 展开说说 / 后来呢」这类是在追问上一条的细节
 DETAIL_Q_RE = re.compile(r"(再|具体|详细|展开|细说|多说|深入|后来|然后呢|为什么|怎么回事)")
 
 
-@register(PLUGIN_NAME, "paopao", "把 B站 AI Bot 刷到的视频接进 QQ", "1.2.6")
+@register(PLUGIN_NAME, "paopao", "把 B站 AI Bot 刷到的视频接进 QQ", "1.4.0")
 class BiliBridge2(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
@@ -90,6 +105,10 @@ class BiliBridge2(Star):
         self._pending: dict[str, str] = {}
         self._cache_hit: dict[str, tuple[str, float]] = {}
         self._last_watch = 0.0
+        self._digest_fp = ""
+        self._digest_checked = 0.0
+        self._last_list_shown = 0
+        self._diary_task: "asyncio.Task | None" = None
         self._data_dir = self._plugin_data_dir()
         try:
             self._data_dir.mkdir(parents=True, exist_ok=True)
@@ -103,6 +122,95 @@ class BiliBridge2(Star):
                 logger.info("[Bridge2] 已把旧的 recent.json 迁到插件数据目录")
             except OSError:
                 pass
+
+    # ── 生命周期：AstrBot 起来后补写并同步 QQ 日记到 B站 ──────────────────
+    async def initialize(self) -> None:
+        if not self._diary_bool("diary_sync_enable", True):
+            logger.info("[Bridge2] 日记同步已关（diary_sync_enable=false），不排队")
+            return
+        delay = max(0, self._diary_int("diary_sync_delay_minutes", 3))
+        logger.info(
+            "[Bridge2] 日记同步已排队：AstrBot 启动后 %s 分钟跑一次（%s）",
+            delay,
+            self._diary_str("diary_sync_script", DEFAULT_DIARY_SCRIPT),
+        )
+        self._diary_task = asyncio.create_task(self._diary_sync_later(delay))
+
+    async def terminate(self) -> None:
+        if self._diary_task and not self._diary_task.done():
+            self._diary_task.cancel()
+
+    async def _diary_sync_later(self, delay_minutes: int) -> None:
+        try:
+            await asyncio.sleep(delay_minutes * 60)
+            await self._run_diary_sync("startup")
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[Bridge2] 启动日记同步失败：%s", exc)
+
+    def _diary_bool(self, key: str, default: bool) -> bool:
+        value = self.config.get(key)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on", "是"}
+        return default
+
+    def _diary_int(self, key: str, default: int) -> int:
+        try:
+            return int(self.config.get(key))
+        except (TypeError, ValueError):
+            return default
+
+    def _diary_str(self, key: str, default: str) -> str:
+        value = self.config.get(key)
+        return str(value).strip() if value is not None and str(value).strip() else default
+
+    async def _run_diary_sync(self, reason: str) -> str:
+        """起一个后台进程跑 sync_qq_diary.py（不等它，输出直接追加进日志）。
+
+        为什么不等：AstrBot 里等子进程在 Windows 上会碰到「子进程已经退出了、
+        管道 EOF 却迟迟不来」的卡死；同步脚本自己就把结果写进日志，
+        这边只负责“点火”，不负责“等它烧完”。
+        """
+
+        script = Path(self._diary_str("diary_sync_script", DEFAULT_DIARY_SCRIPT))
+        if not script.is_file():
+            logger.warning("[Bridge2] 日记同步脚本不存在：%s", script)
+            return "脚本不存在"
+        python = self._diary_str("diary_sync_python", "") or sys.executable
+        args = [python, "-u", str(script)]
+        extra = self._diary_str("diary_sync_extra_args", "")
+        if extra:
+            args += shlex.split(extra)
+        started = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            log_path = Path(self._diary_str("diary_sync_log", DEFAULT_DIARY_LOG))
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_file = log_path.open("a", encoding="utf-8")
+            log_file.write(f"[{started}] start ({reason}): {' '.join(args)}\n")
+            log_file.flush()
+            subprocess.Popen(
+                args,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[Bridge2] 日记同步起不来：%s", exc)
+            return f"起不来：{exc}"
+        logger.info("[Bridge2] 日记同步已在后台跑（%s）：%s", reason, " ".join(args))
+        logger.info("[Bridge2] 同步结果看 %s（写到最后一行就是这次的结论）", log_path)
+        return "已启动（后台）"
+
+    @filter.command("diary_sync")
+    async def diary_sync_command(self, event: AstrMessageEvent):
+        """手动补一次 QQ 日记 → B站 同步（等同等 AstrBot 启动后自动跑的那次）。"""
+
+        result = await self._run_diary_sync("manual")
+        yield event.plain_result(f"日记同步：{result}")
 
     # ── 配置/工具 ────────────────────────────────────────────────────────
     def _owners(self) -> set[str]:
@@ -268,11 +376,21 @@ class BiliBridge2(Star):
             return []
         try:
             data = json.loads(self._recent_path.read_text(encoding="utf-8"))
-            return [r for r in data if isinstance(r, dict) and r.get("bvid")]
         except Exception:  # noqa: BLE001
             return []
+        out: list[dict] = []
+        seen: set[str] = set()
+        for rec in data if isinstance(data, list) else []:
+            if not isinstance(rec, dict) or not rec.get("bvid"):
+                continue
+            bvid = str(rec["bvid"])
+            if bvid in seen:
+                continue
+            seen.add(bvid)
+            out.append(rec)
+        return out
 
-    def _format_list(self, records: list[dict]) -> str:
+    def _format_list(self, records: list[dict], head: str = "最近刷到的：") -> str:
         lines = []
         for i, r in enumerate(records, 1):
             title = str(r.get("title") or "(无标题)").strip()
@@ -280,7 +398,103 @@ class BiliBridge2(Star):
                 title = title[:35] + "…"
             up = f"（{r['up']}）" if r.get("up") else ""
             lines.append(f"{i}. {title}{up} · {r['bvid']}")
-        return "最近刷到的：\n" + "\n".join(lines) + "\n\n想问哪条直接说「第几个讲了什么」。"
+        return head + "\n" + "\n".join(lines) + "\n\n想问哪条直接说「第几个讲了什么」。"
+
+    # ── 给 MemoryCompanion 的「B站近况」续命 ─────────────────────────────
+    def _digest_text(self, rows: list[dict]) -> str:
+        newest = str(rows[0].get("time") or "")
+        day = newest[:10] or datetime.now().strftime("%Y-%m-%d")
+        clock = newest[11:16] or "?"
+        lines = [
+            f"- {r['bvid']} {str(r.get('title') or '')[:30]}"
+            for r in rows[:8]
+        ]
+        hint = (
+            "（老大问起某条具体讲了什么时，用你自己的语气讲：两三句内容 + 你的判断，"
+            "别用「主旨：/关键三点：」这种提纲；他问「最近刷到什么」时以当场给的那份清单为准，"
+            "这段只是底档。）"
+        )
+        text = "\n".join([f"## B站近况（{day}，最近一轮 {clock}）这一轮刷到的：", *lines, hint])
+        return text[:900]
+
+    async def _refresh_core_digest(self, records: list[dict] | None = None) -> None:
+        """把最近一轮写进「B站近况」，再把推给主人的几批单独记成记忆。
+
+        1 版（bili_bridge）就是靠它让「她记忆里的 B站近况」保持新鲜；
+        桥2 接管后不写的话，那条 core block 会永远停在最后一次写入的那天，
+        她一被问「最近刷了什么」就照着几天前的旧片名答。
+        """
+
+        try:
+            owner = next(iter(self._owners()), "")
+            if not owner:
+                return
+            meta = self.context.get_registered_star("astrbot_plugin_memory_companion")
+            if meta is None or not getattr(meta, "activated", False):
+                logger.info("[Bridge2] MemoryCompanion 没启用，跳过 B站近况同步")
+                return
+            service = getattr(getattr(meta, "star_cls", None), "service", None)
+            if service is None:
+                logger.info("[Bridge2] MemoryCompanion 没有暴露 service，跳过")
+                return
+
+            rows = records or self._recent_rows(10)
+            if rows:
+                text = self._digest_text(rows)
+                fingerprint = hashlib.sha256(text.encode("utf-8")).hexdigest()
+                save_core = getattr(service, "save_core_memory_block", None)
+                if save_core is not None and fingerprint != getattr(self, "_digest_fp", ""):
+                    result = await save_core(
+                        {
+                            "id": str(self.config.get("core_block_id") or "bili-digest-core"),
+                            "label": str(self.config.get("core_block_label") or "B站近况"),
+                            "content": text,
+                            "scope": "private",
+                            "target_id": owner,
+                            "kind": "profile",
+                            "priority": 75,
+                            "bot_id": "self",
+                        }
+                    )
+                    ok = bool(isinstance(result, dict) and result.get("ok", True))
+                    if ok:
+                        self._digest_fp = fingerprint
+                        logger.info("[Bridge2] 已更新记忆里的「B站近况」（%s 条，最近 %s）",
+                                    len(rows[:8]), str(rows[0].get("time") or "")[:16])
+                    else:
+                        logger.warning("[Bridge2] 更新 B站近况失败：%s", result)
+
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[Bridge2] 更新 B站近况异常：%s", exc)
+
+    def _push_batches(self, limit: int = 8) -> list[tuple[str, list[str]]]:
+        """从推荐账本里取最近几批推送：同一分钟算一批，返回 [(时间, [BV...]), ...]。"""
+
+        ledger: dict = {}
+        db = self._ai_bot_db()
+        if db.is_file():
+            try:
+                con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
+                row = con.execute(
+                    "select data from keyed_json where kind='state' "
+                    "and key='owner_recommend_log.json' order by id desc limit 1").fetchone()
+                con.close()
+                ledger = json.loads(row[0]) if row and row[0] else {}
+            except Exception:  # noqa: BLE001
+                ledger = {}
+        batches: dict[str, list[str]] = {}
+        if isinstance(ledger, dict):
+            for bvid, item in ledger.items():
+                if not isinstance(item, dict) or not bvid:
+                    continue
+                when = str(item.get("time") or "")
+                batches.setdefault(when, []).append(bvid)
+        if not batches:
+            pushed = [r["bvid"] for r in self._pushed_records()]
+            if pushed:
+                batches[""] = pushed
+        out = sorted(batches.items(), key=lambda kv: kv[0], reverse=True)
+        return out[: max(1, limit)]
 
     @classmethod
     def _cn_count(cls, n: int) -> str:
@@ -742,6 +956,16 @@ class BiliBridge2(Star):
         seen = {r["bvid"] for r in pushed}
         rest = [r for r in self._watch_records() if r["bvid"] not in seen]
         rows = pushed + rest
+        # 同一个视频可能被反复刷到：只留最新那一条，别让清单里出现两遍
+        uniq: list[dict] = []
+        seen_bv: set[str] = set()
+        for rec in rows:
+            bvid = str(rec.get("bvid") or "")
+            if not bvid or bvid in seen_bv:
+                continue
+            seen_bv.add(bvid)
+            uniq.append(rec)
+        rows = uniq
         if limit:
             rows = rows[: max(1, int(limit))]
         return rows
@@ -763,6 +987,51 @@ class BiliBridge2(Star):
         if raw.isdigit():
             return int(raw)
         return CN_NUM.get(raw, 0)
+
+    @staticmethod
+    def _norm_text(value: str) -> str:
+        return re.sub(r"[\s\W_]+", "", str(value or "")).lower()
+
+    # 这些词哪条标题里都有，拿它们重合等于没重合
+    MENTION_STOP = (
+        "视频", "那条", "这个", "那个", "哪些", "讲了", "说的", "什么", "今天",
+        "刚才", "刚刚", "一下", "帮我", "看看", "内容", "意思", "怎么", "回事",
+    )
+
+    def _guess_record_by_mention(self, text: str) -> dict | None:
+        """「悬链线那条讲了什么」→ 按片名模糊找回那条看片记录。
+
+        先把「视频 / 那条 / 讲了 / 什么」这类废话剔掉，只拿剩下的真词去比；
+        连续重合 3 个字起算，3 个字还必须落在标题开头，免得误伤。
+        """
+
+        probe = self._norm_text(text)
+        for word in self.MENTION_STOP:
+            probe = probe.replace(word, "")
+        if len(probe) < 3:
+            return None
+        best: dict | None = None
+        best_size = 0
+        for rec in self._watch_records():
+            title = self._norm_text(rec.get("title"))
+            if not title:
+                continue
+            match = difflib.SequenceMatcher(None, probe, title, autojunk=False).find_longest_match(
+                0, len(probe), 0, len(title))
+            size = int(match.size)
+            if size <= 0:
+                continue
+            chunk = probe[match.a:match.a + size]
+            if any(word in chunk for word in self.MENTION_STOP):
+                continue
+            if size == 3 and match.b >= 3:
+                # 三个字的重合只认标题开头那一下（「悬链线在石拱桥上…」）
+                continue
+            if size > best_size:
+                best_size, best = size, rec
+        if best is None or best_size < 3:
+            return None
+        return best
 
     @filter.llm_tool(name="bili_bridge2_last_round")
     async def tool_last_round(self, event: AstrMessageEvent, hours: int = 24) -> str:
@@ -846,6 +1115,14 @@ class BiliBridge2(Star):
             return
         if not self._is_owner(event):
             return
+        # 每隔几分钟顺手把记忆里的「B站近况」刷成最新一轮（内容没变就不写）。
+        # 不刷的话那条 core block 会一直停在上次写入的日期，她一被问就报旧片名。
+        if time.time() - float(getattr(self, "_digest_checked", 0.0)) > 300:
+            self._digest_checked = time.time()
+            try:
+                asyncio.create_task(self._refresh_core_digest())
+            except Exception:  # noqa: BLE001
+                pass
         try:
             text = str(event.message_str or "")
         except Exception:  # noqa: BLE001
@@ -948,7 +1225,7 @@ class BiliBridge2(Star):
                 return
 
         # ② 问「最近刷到什么」→ 问内容才回清单；只问时间/刷没刷就一句话
-        if RECENT_Q_RE.search(text):
+        if RECENT_Q_RE.search(text) or RECENT_Q_RE2.search(text):
             hours = int(self.config.get("watch_memory_hours") or 24)
             rounds = self._rounds(hours)
             last_round = rounds[-1] if rounds else []
@@ -959,13 +1236,26 @@ class BiliBridge2(Star):
                 list_max = int(self.config.get("recent_list_max_chars", 12) or 12)
             except (TypeError, ValueError):
                 list_max = 12
+            try:
+                low = int(self.config.get("recent_limit_min") or 5)
+            except (TypeError, ValueError):
+                low = 5
+            try:
+                high = int(self.config.get("recent_limit") or 10)
+            except (TypeError, ValueError):
+                high = 10
+            low = max(1, min(low, high))
+            high = max(low, high)
             now = time.time()
             try:
                 repeat_window = int(self.config.get("list_repeat_window", 600) or 600)
             except (TypeError, ValueError):
                 repeat_window = 600
             if now - float(getattr(self, "_last_list_at", 0.0)) <= repeat_window:
-                logger.info("[Bridge2] 刚发过清单（%.0f 秒内），交给模型回", now - float(getattr(self, "_last_list_at", 0.0)))
+                since = now - float(getattr(self, "_last_list_at", 0.0))
+                # 又问一遍：还是让她说，但把刚才那份清单原样塞给她当参考，
+                # 免得她手里没数据、照着记忆总结编出几天前的片名。
+                logger.info("[Bridge2] 刚发过清单（%.0f 秒内），交给她说（清单当参考）", since)
                 try:
                     event.set_extra("bridge2_repeat_list", True)
                 except Exception:  # noqa: BLE001
@@ -987,25 +1277,52 @@ class BiliBridge2(Star):
                 return
             await asyncio.sleep(random.uniform(2.0, 5.0))
             try:
-                low = int(self.config.get("recent_limit_min") or 5)
+                store_limit = int(self.config.get("recent_store_limit") or 20)
             except (TypeError, ValueError):
-                low = 5
-            try:
-                high = int(self.config.get("recent_limit") or 10)
-            except (TypeError, ValueError):
-                high = 10
-            low = max(1, min(low, high))
-            high = max(low, high)
-            rows = self._recent_rows(high)
-            if rows:
-                take = random.randint(low, high) if len(rows) >= low else len(rows)
-                records = rows[:take]
-                self._save_recent(records)
-                logger.info("[Bridge2] 最近清单 %s 条（%s~%s 随机）", len(records), low, high)
+                store_limit = 20
+            store_limit = max(high, min(store_limit, 60))
+            full_rows = self._recent_rows(store_limit)
+            if full_rows:
+                # 清单里存全（默认 20 条），发出去的还是 5~10 条
+                self._save_recent(full_rows)
+                take = random.randint(low, high) if len(full_rows) >= low else len(full_rows)
+                records = full_rows[:take]
+                self._last_list_shown = len(records)
+                logger.info("[Bridge2] 最近清单：存 %s 条，发 %s 条（%s~%s 随机）",
+                            len(full_rows), len(records), low, high)
                 self._last_list_at = time.time()
+                try:
+                    asyncio.create_task(self._refresh_core_digest(full_rows))
+                except Exception:  # noqa: BLE001
+                    pass
                 yield event.plain_result(self._format_list(records))
             else:
                 yield event.plain_result("最近还没有看片记录（B站 AI Bot 还没刷过）。")
+            return
+
+        # ②.5 问「你推过什么 / 上周发给我哪些」→ 直接从推荐账本翻，别指望记忆检索
+        if PUSH_RECALL_RE.search(text) and not BV_RE.search(text):
+            days = 7
+            m_days = re.search(r"(?:近|最近|这)\s*([0-9一两二三四五六七八九十]+)\s*天", text)
+            if m_days:
+                raw = m_days.group(1)
+                try:
+                    days = CN_NUM.get(raw) or int(raw)
+                except (TypeError, ValueError):
+                    days = 7
+            rows = self._push_history(days)
+            if rows:
+                lines = [
+                    f"{i}. {r['time'][5:16]} {str(r.get('title') or '(无标题)')[:26]} · {r['bvid']}"
+                    for i, r in enumerate(rows[:12], 1)
+                ]
+                logger.info("[Bridge2] 推送历史 %s 条（近 %s 天）", len(lines), days)
+                await asyncio.sleep(random.uniform(1.0, 2.5))
+                yield event.plain_result(
+                    f"近 {days} 天推给你的，翻到 {len(rows)} 条：\n" + "\n".join(lines)
+                    + "\n\n想听哪条说「第几个讲了什么」。")
+            else:
+                yield event.plain_result(f"近 {days} 天没有推给你的记录。")
             return
 
         # ③ 问「第几个讲了什么」→ 序号换 BV 再拉素材
@@ -1026,6 +1343,24 @@ class BiliBridge2(Star):
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[Bridge2] 取第 %s 个素材失败：%s", idx, exc)
             return
+
+        # ③.8 提片名问细节（「悬链线那条讲了什么」）→ 按标题模糊找回那条，再把素材挂上
+        if DETAIL_WORD_RE.search(text) and not BV_RE.search(text) and not self._ordinal(text):
+            rec = self._guess_record_by_mention(text)
+            if rec:
+                try:
+                    hours = int(self.config.get("watch_memory_hours") or 24)
+                    material = self._cached_detail(rec["bvid"], hours)
+                    if not material:
+                        material = await self._fetch_material(rec["bvid"])
+                    self._pending[origin] = (
+                        f"【他问的就是这一条：《{rec.get('title') or ''}》 {rec['bvid']}"
+                        f"（{rec.get('time') or ''} 刷到的）】\n" + material
+                    )
+                    logger.info("[Bridge2] 按片名命中 %s（%s）", rec["bvid"], rec.get("title"))
+                    return
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("[Bridge2] 按片名找素材失败：%s", exc)
 
         # ③.5 追问细节：上一条是用 24 小时缓存答的，再追问就现拉一次，别拿旧解析糊弄
         if DETAIL_Q_RE.search(text):
@@ -1163,7 +1498,31 @@ class BiliBridge2(Star):
             if TextPart is None:
                 return
             await asyncio.sleep(random.uniform(0.6, 1.2))
-            part = TextPart(text="（后台资料：刚才已经把最近刷到的清单列过了，别再重复列；用一两句话带过，问他想听哪条。）")
+            records = self._load_recent() or self._recent_rows(20)
+            if records:
+                shown = int(getattr(self, "_last_list_shown", 0) or 0)
+                lines = [
+                    f"{i}. {str(r.get('title') or '')[:24]}"
+                    f"{'（' + str(r.get('up'))[:8] + '）' if r.get('up') else ''} {r.get('bvid')}"
+                    for i, r in enumerate(records, 1)
+                ]
+                if 0 < shown < len(records):
+                    scope = (f"刚才你只把前 {shown} 条发给了他，后面 {len(records) - shown} 条"
+                             "他没在消息里看到，别当成他都知道。")
+                else:
+                    scope = "刚才发给他的可能只是其中一部分。"
+                note = (
+                    f"（后台资料：这是完整的清单，共 {len(records)} 条（最近的）：\n"
+                    + "\n".join(lines)
+                    + f"\n{scope}"
+                    "他这次又问了一遍——别复读清单，用你自己的口吻挑两三条说；"
+                    "可以带上你对这几条的看法、之前聊过的一点印象（记忆里有就顺手带一句，"
+                    "让这次跟刚才那份清单有点区别）；但片名只能从上面这份里挑，"
+                    "地名、人名、标题别自己加，记忆/总结里更早的旧片名别当成「最近」报给他。）"
+                )
+            else:
+                note = "（后台资料：刚才已经把最近刷到的清单列过了，别再重复列；用一两句话带过，问他想听哪条。）"
+            part = TextPart(text=note)
             for attr in ("mark_as_temp", "make_as_temp"):
                 marker = getattr(part, attr, None)
                 if callable(marker):
@@ -1175,7 +1534,7 @@ class BiliBridge2(Star):
                         pass
                     break
             req.extra_user_content_parts.append(part)
-            logger.info("[Bridge2] 重复要清单：已注入「别重复」说明")
+            logger.info("[Bridge2] 重复要清单：已注入清单参考（%s 条）", len(records) if records else 0)
             return
         if not WATCH_RECALL_RE.search(text):
             return
@@ -1200,7 +1559,8 @@ class BiliBridge2(Star):
             picks = "、".join(str(r.get("title") or "")[:16] for r in flat[:3])
             note = (
                 f"（后台资料：近 {hours} 小时刷了 {len(flat)} 个，最近一轮在 {when}。"
-                f"挑着提两三条就行（比如 {picks}），别列整张清单、别贴一串 BV。）"
+                f"挑着提两三条就行（比如 {picks}），别列整张清单、别贴一串 BV；"
+                "记忆总结里的旧片名不算最近的。）"
             )
         elif content_ask:
             # 问「刷到了什么」才给清单，且别秒回：先压 2~5 秒
@@ -1215,7 +1575,8 @@ class BiliBridge2(Star):
                 f"（后台资料：近 {hours} 小时刷了 {len(flat)} 个，最近一轮在 {when}。清单：\n"
                 + "\n".join(lines)
                 + "\n直接照这个答，别编具体分秒；要某条细节按 BV 调 "
-                "bili_bridge2_read（近 24 小时有缓存，不用现拉）。）"
+                "bili_bridge2_read（近 24 小时有缓存，不用现拉）。"
+                "这份是刚查的、以它为准——记忆总结里那些更早的片名别再往「最近」里算。）"
             )
         else:
             # 只问时间 / 只问「刷没刷」：一两句话说清，别列清单

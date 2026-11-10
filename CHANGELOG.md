@@ -1,4 +1,47 @@
-﻿## 1.3.0 — 2026-11-09
+## 1.4.0 — 2026-11-10
+
+- 把「QQ 日记 → B站 记忆」同步并进来（原来是一个独立小插件 `astrbot_plugin_qq_diary_sync`，已删除）：
+  AstrBot 每次启动 → 等 `diary_sync_delay_minutes`（默认 3 分钟）→ 跑一次 `sync_qq_diary.py`。
+- 新增配置：`diary_sync_enable` / `diary_sync_delay_minutes` / `diary_sync_script` /
+  `diary_sync_python` / `diary_sync_extra_args`（默认 `--no-wait`）/ `diary_sync_timeout` / `diary_sync_log`。
+- 手动补一次：私聊发 `/diary_sync`。
+- 日志：AstrBot 日志有 `[Bridge2] 日记同步完成（exit=0）`，脚本自己的输出追加到 `D:\app1\logs\qqdiary_sync.log`。
+- 为什么并进来：日记补写和同步都得等 AstrBot 起来才有意义，跟着桥2 的生命周期走最省事，
+  也少一个要单独装的插件。
+
+## 1.3.5 — 2026-11-09
+
+- 改走清单路线，不再往记忆库塞推送记录：`recent.json` 现在存最近 20 条（`recent_store_limit`），触发时仍只发 5~10 条。
+- 再问一遍时把**完整 20 条**给她当参考，并明确告诉她「这是完整清单，刚才只发了前 N 条，后面那些他没在消息里看到」。
+- 删掉 1.3.3/1.3.4 的「推送进记忆」写入与清理（不再增长的记忆库）；`push_memory_limit` 保留兼容但已失效。
+- 补一个「你推过什么 / 上周发给我哪些」的直答：从推荐账本翻，不靠记忆检索（`近 N 天推给你的…`）。
+- 清单去重：同一个视频被刷到多次只留最新一条（之前会出现同一条列两遍）。
+
+## 1.3.4 — 2026-11-09
+
+- 「推送记忆」加上限：默认只留最近 20 条（`push_memory_limit`，0=不清理），超出的按时间删最旧的，避免记忆库无限长。
+- 删的时候走 MemoryCompanion 自己的 `store.delete_memory`，FTS 索引一起清；只动 `source_plugin='bili-bridge2'` 的 `bili-round-*`，1 版留下的 54 条不碰。
+
+## 1.3.3 — 2026-11-09
+
+- 重复问清单时不再要求「只用这份」：允许她带上自己对这些片子的看法、之前聊过的印象，跟清单做出区别；只限定片名必须来自这份清单，别把几天前的旧片名当成「最近」。
+- 新增「推送进记忆」：每批推给主人的视频单独记一条 `external_memory`（`bili-round-<hash>`，带标题、BV、当时的感想），以后问「上周推过什么」翻得到。第一次会把推荐账本里现有的推送全补一遍，之后只看最近 8 批，重复的按 idempotency key 自动去重。
+
+## 1.3.2 — 2026-11-09
+
+- 重复问清单改回「她来说」：10 分钟内再问一次，不再由插件复读，改成把刚才那份清单原样塞给她当参考，让她用自己的口吻挑两三条带一下。
+- 注入里明确写了「只用这份，记忆/总结里更早的片名别拿来答」，1.3.1 的「不会再报旧片名」保证仍成立。
+
+## 1.3.1 — 2026-11-09
+
+- 修「问最近刷什么都没变」：清单刚发过又被问一遍时，改成**照刚才那份再念一次**（同一份 `recent.json`），不再只丢一句「别重复列」让模型自己编。
+- 注入给模型的清单加一句「以这份为准，记忆总结里更早的片名不算最近」——之前她会把昨天的 see-now / 悬链线 / 桑多涅当成「最近」。
+- 新增按片名问细节：「悬链线那条讲了什么」「Morten 那条讲了啥」→ 用标题模糊匹配找回 BV，再把素材挂给模型；不用再先列清单。
+- 接管 1 版留下的「B站近况」核心记忆（MemoryCompanion 的 `bili-digest-core`）：启动后和每次发清单时把最近一轮写回去。之前没人写，那条记忆一直停在 11-07 04:30 那一轮，她就照着几天前的片名答「最近刷的」。新增配置 `core_block_id` / `core_block_label`。
+- 「刷的都啥」「看过的有哪些」这类不带时间词的说法，也算问清单。
+- `@register` 版本号跟上，`metadata.yaml` 描述改成 sqlite 数据源 + 按片名提问。
+
+## 1.3.0 — 2026-11-09
 
 - 适配 B站 AI Bot 2.0：主数据源改为 `bilibot.sqlite3`（`activity_log` / `keyed_json`），旧 `watch_log.json` / `video_memory.json` / `owner_last_push.json` 仅作兜底。
 - 刷一轮改用 2.0 的 `activities._run_activity_now('proactive', max_watch=N)`，兼容旧 `_run_proactive`。

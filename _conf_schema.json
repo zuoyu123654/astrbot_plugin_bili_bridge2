@@ -65,8 +65,58 @@
     "default": 12
   },
   "list_repeat_window": {
-    "description": "清单重复保护：多少秒内再问「刷到什么」不再重复发（默认 600）",
+    "description": "清单重复保护：多少秒内再问「刷到什么」就原样再念一遍（默认 600）",
     "type": "int",
     "default": 600
+  },
+  "core_block_id": {
+    "description": "写进「记忆」的 core block id（默认沿用 1 版的 bili-digest-core，别乱改，改了会多出一条）",
+    "type": "string",
+    "default": "bili-digest-core"
+  },
+  "core_block_label": {
+    "description": "这条 core block 在记忆里的标题",
+    "type": "string",
+    "default": "B站近况"
+  },
+  "push_memory_limit": {
+    "description": "（已废弃，保留兼容）推送不再写进记忆库，改用清单",
+    "type": "int",
+    "default": 20
+  },
+  "recent_store_limit": {
+    "description": "清单里记多少条（默认 20）；触发时仍只发 recent_limit_min~recent_limit 条",
+    "type": "int",
+    "default": 20
+  },
+  "diary_sync_enable": {
+    "type": "bool",
+    "description": "AstrBot 启动后自动跑一次「QQ 日记 → B站记忆」同步",
+    "default": true
+  },
+  "diary_sync_delay_minutes": {
+    "type": "int",
+    "description": "启动后等多少分钟再跑（给陪伴插件补写日记留时间，默认 3）",
+    "default": 3
+  },
+  "diary_sync_script": {
+    "type": "string",
+    "description": "同步脚本路径",
+    "default": "D:\\app1\\tools\\sync_qq_diary.py"
+  },
+  "diary_sync_python": {
+    "type": "string",
+    "description": "用哪个 python 跑（留空 = AstrBot 自己的解释器）",
+    "default": ""
+  },
+  "diary_sync_extra_args": {
+    "type": "string",
+    "description": "附加参数（默认 --no-wait：启动这次不空等；每日 00:05 计划任务才等日记）",
+    "default": "--no-wait"
+  },
+  "diary_sync_log": {
+    "type": "string",
+    "description": "同步输出追加到哪个日志",
+    "default": "D:\\app1\\logs\\qqdiary_sync.log"
   }
 }

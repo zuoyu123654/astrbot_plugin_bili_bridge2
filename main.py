@@ -51,6 +51,8 @@ PLUGIN_NAME = "astrbot_plugin_bili_bridge2"
 DEFAULT_DIARY_SCRIPT = "sync_qq_diary.py"
 DEFAULT_DIARY_LOG = "qqdiary_sync.log"
 BV_RE = re.compile(r"(BV[0-9A-Za-z]{10})")
+# 老式 av 号链接（bilibili.com/video/av12345）：BV_RE 认不出，单独兜一下
+AV_RE = re.compile(r"(?:^|[/=?&])av(\d{3,12})", re.I)
 # B站分享卡片里放的是短链（b23.tv / bili2233.cn），不带 BV，得跟一次 302 才拿得到
 SHORT_RE = re.compile(r"(?:https?://)?(?:b23\.tv|bili2233\.cn)/([0-9A-Za-z]{4,16})")
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
@@ -107,6 +109,14 @@ class BiliBridge2(Star):
         self._pending: dict[str, str] = {}
         self._cache_hit: dict[str, tuple[str, float]] = {}
         self._last_watch = 0.0
+        # 老大分享过来的视频：后台真看一遍，看完写进记忆（会镜像进中枢）
+        self._share_watching: set[str] = set()
+        self._share_watched: dict[str, float] = {}
+        self._share_watch_tasks: set["asyncio.Task"] = set()
+        self._share_watch_ttl = 6 * 3600
+        self._share_done: tuple[float, str, str] | None = None
+        # 分享时拉到的字幕/简介，完整分析跑不动时拿它兜底写记忆
+        self._last_share_material: dict[str, tuple[float, str]] = {}
         self._digest_fp = ""
         self._digest_checked = 0.0
         self._last_list_shown = 0
@@ -432,6 +442,17 @@ class BiliBridge2(Star):
         )
         text = "\n".join([f"## B站近况（{day}，最近一轮 {clock}）这一轮刷到的：", *lines, hint])
         return text[:900]
+
+    def _digest_enabled(self) -> bool:
+        """「B站近况」核心块要不要继续写。默认关。
+
+        健康记忆中枢接管跨端之后，核心块等于第二份简报，和中枢里她自己的看片记录重复。
+        想恢复 1 版「每轮对话都带上最近一轮」的行为，把 ``core_digest_enable`` 打开。
+        """
+        value = self.config.get("core_digest_enable", False)
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
     async def _refresh_core_digest(self, records: list[dict] | None = None) -> None:
         """把最近一轮写进「B站近况」，再把推给主人的几批单独记成记忆。
@@ -759,6 +780,158 @@ class BiliBridge2(Star):
                 logger.info("[Bridge2] 短链 %s → %s", code, bv)
                 return bv
         return ""
+
+    async def _resolve_video_ref(self, event: AstrMessageEvent) -> tuple[str, str]:
+        """认出视频编号，返回 ``("BV", "BV1xx")`` / ``("AV", "av12345")`` / ``("", "")``。
+
+        比 ``_resolve_bvid`` 多认两种：纯文本链接里的 BV，和老的 av 号。
+        卡片、b23 短链、完整链接、纯文本 BV 都走这里。
+        """
+        blob = "\n".join(self._collect_chunks(event))
+        m = BV_RE.search(blob)
+        if m:
+            return "BV", m.group(1)
+        for code in dict.fromkeys(SHORT_RE.findall(blob)):
+            bv = await asyncio.to_thread(BiliBridge2._follow_short, code)
+            if bv:
+                logger.info("[Bridge2] 短链 %s → %s", code, bv)
+                return "BV", bv
+        m = AV_RE.search(blob)
+        if m:
+            return "AV", f"av{m.group(1)}"
+        return "", ""
+
+    # ── 分享过来就真看一遍 ────────────────────────────────────────────────
+    def _start_share_watch(self, video_id: str) -> None:
+        """老大分享过来一个视频 → 让她真的去看一遍（后台跑，不挡回复）。
+
+        真看走的是 B站 AI Bot 自己的完整流程：字幕 / ASR、评分、写 video 记忆。
+        写记忆那一步会镜像进记忆中枢（``bot_self``），所以在 QQ、B站、DSH 都答得出。
+        """
+        vid = str(video_id or "").strip()
+        if not vid:
+            return
+        if vid in self._share_watching:
+            logger.info("[Bridge2] 已经在看了，不重复：%s", vid)
+            return
+        done_at = self._share_watched.get(vid)
+        if done_at and time.time() - done_at < self._share_watch_ttl:
+            logger.info("[Bridge2] 最近看过，跳过：%s", vid)
+            return
+        self._share_watching.add(vid)
+        try:
+            task = asyncio.create_task(self._share_watch_task(vid))
+        except Exception as exc:  # noqa: BLE001
+            self._share_watching.discard(vid)
+            logger.warning("[Bridge2] 起看片任务失败：%s", exc)
+            return
+        self._share_watch_tasks.add(task)
+        task.add_done_callback(self._share_watch_tasks.discard)
+
+    async def _share_watch_task(self, video_id: str) -> None:
+        try:
+            inst = self._ai_bot_instance()
+            if inst is None:
+                logger.info("[Bridge2] B站 AI Bot 不在，分享的视频没看成：%s", video_id)
+                return
+            watcher = getattr(inst, "watch_on_request", None)
+            fn = getattr(watcher, "_watch_video_and_save_memory", None)
+            if not callable(fn):
+                logger.info("[Bridge2] B站 AI Bot 没有看片入口，跳过：%s", video_id)
+                return
+            result = await fn(video_id, "qq_share", force_rewatch=True)
+            ok = bool(result.get("ok")) if isinstance(result, dict) else False
+            # 「以前见过、这次没重看」也会返回 ok，但不能当成刚看完去报喜
+            seen_only = bool(result.get("seen_only")) if isinstance(result, dict) else False
+            msg = str(result.get("message") or "") if isinstance(result, dict) else ""
+            # 缺 yt-dlp / 视觉模型时，分析会退化成「根据标题、标签推测」的 metadata 级：
+            # 依然返回 ok，但一条长期记忆都不写。认出来，别当成真看。
+            weak = (
+                "根据标题" in msg
+                or "未取得可靠" in msg
+                or "曾经看过" in msg
+                or bool(result.get("from_cache")) and "详细内容" in msg
+            ) if isinstance(result, dict) else True
+            if ok and not seen_only and not weak:
+                logger.info("[Bridge2] 分享视频真看完成：%s", video_id)
+                self._share_watched[video_id] = time.time()
+                self._share_done = (time.time(), video_id, msg[:1200])
+            else:
+                logger.info(
+                    "[Bridge2] 分享视频没进完整分析（%s），改用字幕素材记一条",
+                    "仅命中旧记录" if seen_only else ("内容分析降级" if weak else "失败"),
+                )
+            # 不管上面成没成，都保证中枢里有这条。已经写过就跳过（幂等键同一个）。
+            await self._ensure_share_memory(video_id, already=ok and not seen_only and not weak)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[Bridge2] 分享视频看失败 %s：%s", video_id, exc)
+        finally:
+            self._share_watching.discard(video_id)
+
+    async def _ensure_share_memory(self, video_id: str, *, already: bool = False) -> None:
+        """保证这条分享在中枢里有一条记忆。
+
+        ``already=True`` 说明 B站 AI Bot 自己写过了，它写的时候会镜像进中枢，
+        这里先查一下，有就跳过；没有（分析降级、或镜像没成功）再用字幕素材补一条。
+        """
+        try:
+            meta = self.context.get_registered_star("paopao_life_bridge")
+            if meta is None or not getattr(meta, "activated", False):
+                logger.info("[Bridge2] 没有生活桥，分享的记忆没处写")
+                return
+            bridge = getattr(meta, "star_cls", None)
+            if bridge is None:
+                return
+            if already:
+                has = getattr(bridge, "has_memory", None)
+                mid = f"bili:video:{video_id}" if video_id.upper().startswith("BV") else ""
+                if callable(has) and mid and await has(mid):
+                    logger.info("[Bridge2] 中枢里已有这条，不重复写：%s", video_id)
+                    return
+            await self._remember_share_text(video_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[Bridge2] 补写分享记忆失败 %s：%s", video_id, exc)
+
+    async def _remember_share_text(self, video_id: str) -> None:
+        """分析链跑不动时，用已经拉到的字幕/简介在中枢写一条「我看过」。
+
+        reality 标 ``media_index``：她确实拿到了文字资料，但没看画面。
+        不这么标的话，她会跟人说「我看了」，被追问画面细节就露馅。
+        """
+        try:
+            meta = self.context.get_registered_star("paopao_life_bridge")
+            if meta is None or not getattr(meta, "activated", False):
+                logger.info("[Bridge2] 没有生活桥，字幕素材没处写")
+                return
+            bridge = getattr(meta, "star_cls", None)
+            remember = getattr(bridge, "remember_bili", None)
+            if not callable(remember):
+                return
+            cached = self._last_share_material.get(video_id)
+            material = cached[1] if cached else ""
+            if not material:
+                try:
+                    material = await self._fetch_material(video_id)
+                except Exception:  # noqa: BLE001
+                    material = ""
+            if not material:
+                logger.info("[Bridge2] 没拿到素材，这条不记：%s", video_id)
+                return
+            text = "老大分享给我一个 B站 视频，我看了它的简介和字幕：" + str(material)[:600]
+            await remember(
+                text,
+                kind="video",
+                visibility="bot_self",
+                bvid=video_id if video_id.upper().startswith("BV") else "",
+                reality="media_index",
+                tags=["B站", "分享", "字幕"],
+                important=0.55,
+            )
+            logger.info("[Bridge2] 已用字幕素材记下这条分享：%s", video_id)
+            self._share_watched[video_id] = time.time()
+            self._share_done = (time.time(), video_id, text[:900])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[Bridge2] 记字幕素材失败 %s：%s", video_id, exc)
 
     def _dump_card(self, event: AstrMessageEvent) -> None:
         """认不出卡片时把原始结构落盘，方便照真实字段补解析。"""
@@ -1132,8 +1305,9 @@ class BiliBridge2(Star):
         if not self._is_owner(event):
             return
         # 每隔几分钟顺手把记忆里的「B站近况」刷成最新一轮（内容没变就不写）。
-        # 不刷的话那条 core block 会一直停在上次写入的日期，她一被问就报旧片名。
-        if time.time() - float(getattr(self, "_digest_checked", 0.0)) > 300:
+        # 健康记忆中枢接管跨端之后，这块等于第二份简报，和中枢里的看片记录重复，
+        # 所以默认关；要恢复 1 版的每轮简报行为，把 core_digest_enable 打开。
+        if self._digest_enabled() and time.time() - float(getattr(self, "_digest_checked", 0.0)) > 300:
             self._digest_checked = time.time()
             try:
                 asyncio.create_task(self._refresh_core_digest())
@@ -1387,9 +1561,9 @@ class BiliBridge2(Star):
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("[Bridge2] 追问时现拉失败：%s", exc)
 
-        # ④ 分享卡片 / 短链（QQ 卡片里通常只有 b23.tv 短链，得跟 302 才拿得到 BV）
-        bvid = await self._resolve_bvid(event)
-        if not bvid:
+        # ④ 分享卡片 / 短链 / 纯链接（卡片里通常只有 b23.tv 短链，得跟 302 才拿得到 BV）
+        kind, vid = await self._resolve_video_ref(event)
+        if not vid:
             self._dump_card(event)
             try:
                 segs = []
@@ -1403,29 +1577,35 @@ class BiliBridge2(Star):
                             segs, comps, str(text)[:80])
             except Exception as exc:  # noqa: BLE001
                 logger.info("[Bridge2] 结构诊断失败：%s", exc)
-        if bvid:
-            logger.info("[Bridge2] 分享卡片解析到 %s", bvid)
+        if vid:
+            logger.info("[Bridge2] 分享解析到 %s %s", kind, vid)
             # 卡片消息的文本是空的；AstrBot 会把空消息判成无效、根本不去叫模型。
             # 1 版就是靠这一步救活的：把一句可读文字写回消息。
-            if (not text.strip()) or (bvid not in text):
-                filled = f"（我分享了一个 B站 视频：https://www.bilibili.com/video/{bvid}，帮我看看）"
+            if (not text.strip()) or (vid not in text):
+                filled = f"（我分享了一个 B站 视频：https://www.bilibili.com/video/{vid}，帮我看看）"
                 event.message_str = filled
                 try:
                     event.message_obj.message_str = filled
                 except Exception:  # noqa: BLE001
                     pass
-                logger.info("[Bridge2] 卡片补文字：%s", bvid)
+                logger.info("[Bridge2] 卡片补文字：%s", vid)
             try:
-                hours = int(self.config.get("watch_memory_hours") or 24)
-                material = self._cached_detail(bvid, hours)
-                if material:
-                    logger.info("[Bridge2] 命中近 %s 小时缓存：%s", hours, bvid)
-                    self._cache_hit[origin] = (bvid, time.time())
-                else:
-                    material = await self._fetch_material(bvid)
+                material = ""
+                if kind == "BV":
+                    hours = int(self.config.get("watch_memory_hours") or 24)
+                    material = self._cached_detail(vid, hours)
+                    if material:
+                        logger.info("[Bridge2] 命中近 %s 小时缓存：%s", hours, vid)
+                        self._cache_hit[origin] = (vid, time.time())
+                    else:
+                        material = await self._fetch_material(vid)
                 self._pending[origin] = material
+                if material:
+                    self._last_share_material[vid] = (time.time(), str(material))
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[Bridge2] 取素材失败：%s", exc)
+            # 真看一遍：后台跑，写完记忆会镜像进记忆中枢
+            self._start_share_watch(vid)
 
     @filter.on_llm_request()
     async def inject_watch_note(self, event: AstrMessageEvent, req: ProviderRequest):
@@ -1620,6 +1800,20 @@ class BiliBridge2(Star):
     @filter.on_llm_request()
     async def inject_material(self, event: AstrMessageEvent, req: ProviderRequest):
         origin = getattr(event, "unified_msg_origin", "") or ""
+        # 老大分享过来、刚刚真看完的视频：让她能主动接一句「我看完了」
+        done = self._share_done
+        if done and time.time() - done[0] < 1800:
+            self._share_done = None
+            if TextPart is not None:
+                try:
+                    req.extra_user_content_parts.append(TextPart(text=(
+                        "（补充：你刚把老大分享的那个视频真看完了，下面是你的看片记录。"
+                        "可以自然地说一句你看到了什么，不要整段复述，"
+                        "也不要把「已完成视频分析」这类字样说出来）\n" + done[2]
+                    )))
+                    logger.info("[Bridge2] 已注入真看结果：%s", done[1])
+                except Exception:  # noqa: BLE001
+                    pass
         material = self._pending.pop(origin, None)
         if not material:
             # 前一步没留下素材（比如短链补正文没生效），这里再解析一次兜底

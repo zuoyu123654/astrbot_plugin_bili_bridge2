@@ -118,5 +118,11 @@
     "type": "string",
     "description": "同步日志路径。留空 = 插件数据目录下的 qqdiary_sync.log。",
     "default": ""
+  },
+  "core_digest_enable": {
+    "description": "继续写「B站近况」核心块",
+    "type": "bool",
+    "default": false,
+    "hint": "默认关。健康记忆中枢接管跨端后，核心块等于第二份简报，和中枢里的看片记录重复。只有没装记忆中枢、或者想恢复 1 版「每轮都带最近一轮」的行为时才打开。"
   }
 }

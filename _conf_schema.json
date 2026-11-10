@@ -91,8 +91,8 @@
   },
   "diary_sync_enable": {
     "type": "bool",
-    "description": "AstrBot 启动后自动跑一次「QQ 日记 → B站记忆」同步",
-    "default": true
+    "description": "AstrBot 启动后自动把 QQ 日记同步进 B站 记忆（会执行外部 Python 脚本）。默认关闭，需要自己开。",
+    "default": false
   },
   "diary_sync_delay_minutes": {
     "type": "int",
@@ -101,8 +101,8 @@
   },
   "diary_sync_script": {
     "type": "string",
-    "description": "同步脚本路径",
-    "default": "D:\\app1\\tools\\sync_qq_diary.py"
+    "description": "同步脚本路径。留空 = 插件数据目录下的 sync_qq_diary.py（plugin_data/astrbot_plugin_bili_bridge2/）。",
+    "default": ""
   },
   "diary_sync_python": {
     "type": "string",
@@ -116,7 +116,7 @@
   },
   "diary_sync_log": {
     "type": "string",
-    "description": "同步输出追加到哪个日志",
-    "default": "D:\\app1\\logs\\qqdiary_sync.log"
+    "description": "同步日志路径。留空 = 插件数据目录下的 qqdiary_sync.log。",
+    "default": ""
   }
 }

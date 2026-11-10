@@ -46,8 +46,10 @@ except Exception:  # noqa: BLE001
 
 PLUGIN_NAME = "astrbot_plugin_bili_bridge2"
 # QQ 日记 → B站 记忆的同步（AstrBot 启动后跑一次；脚本路径可以改）
-DEFAULT_DIARY_SCRIPT = r"D:\app1\tools\sync_qq_diary.py"
-DEFAULT_DIARY_LOG = r"D:\app1\logs\qqdiary_sync.log"
+# 默认值不再指向作者本机路径：放到本插件自己的 plugin_data 里。
+# 真正的路径在运行时用 _diary_default_script() / _diary_default_log() 算。
+DEFAULT_DIARY_SCRIPT = "sync_qq_diary.py"
+DEFAULT_DIARY_LOG = "qqdiary_sync.log"
 BV_RE = re.compile(r"(BV[0-9A-Za-z]{10})")
 # B站分享卡片里放的是短链（b23.tv / bili2233.cn），不带 BV，得跟一次 302 才拿得到
 SHORT_RE = re.compile(r"(?:https?://)?(?:b23\.tv|bili2233\.cn)/([0-9A-Za-z]{4,16})")
@@ -125,14 +127,14 @@ class BiliBridge2(Star):
 
     # ── 生命周期：AstrBot 起来后补写并同步 QQ 日记到 B站 ──────────────────
     async def initialize(self) -> None:
-        if not self._diary_bool("diary_sync_enable", True):
+        if not self._diary_bool("diary_sync_enable", False):
             logger.info("[Bridge2] 日记同步已关（diary_sync_enable=false），不排队")
             return
         delay = max(0, self._diary_int("diary_sync_delay_minutes", 3))
         logger.info(
             "[Bridge2] 日记同步已排队：AstrBot 启动后 %s 分钟跑一次（%s）",
             delay,
-            self._diary_str("diary_sync_script", DEFAULT_DIARY_SCRIPT),
+            self._diary_str("diary_sync_script", self._diary_default_script()),
         )
         self._diary_task = asyncio.create_task(self._diary_sync_later(delay))
 
@@ -175,7 +177,7 @@ class BiliBridge2(Star):
         这边只负责“点火”，不负责“等它烧完”。
         """
 
-        script = Path(self._diary_str("diary_sync_script", DEFAULT_DIARY_SCRIPT))
+        script = Path(self._diary_str("diary_sync_script", self._diary_default_script()))
         if not script.is_file():
             logger.warning("[Bridge2] 日记同步脚本不存在：%s", script)
             return "脚本不存在"
@@ -186,7 +188,7 @@ class BiliBridge2(Star):
             args += shlex.split(extra)
         started = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         try:
-            log_path = Path(self._diary_str("diary_sync_log", DEFAULT_DIARY_LOG))
+            log_path = Path(self._diary_str("diary_sync_log", self._diary_default_log()))
             log_path.parent.mkdir(parents=True, exist_ok=True)
             log_file = log_path.open("a", encoding="utf-8")
             log_file.write(f"[{started}] start ({reason}): {' '.join(args)}\n")
@@ -213,6 +215,20 @@ class BiliBridge2(Star):
         yield event.plain_result(f"日记同步：{result}")
 
     # ── 配置/工具 ────────────────────────────────────────────────────────
+    def _plugin_data_dir(self) -> Path:
+        """本插件自己的数据目录（拿不到就退回插件目录）。"""
+
+        try:
+            return Path(StarTools.get_data_dir(PLUGIN_NAME))
+        except Exception:  # noqa: BLE001
+            return Path(__file__).resolve().parent / "data"
+
+    def _diary_default_script(self) -> str:
+        return str(self._plugin_data_dir() / DEFAULT_DIARY_SCRIPT)
+
+    def _diary_default_log(self) -> str:
+        return str(self._plugin_data_dir() / DEFAULT_DIARY_LOG)
+
     def _owners(self) -> set[str]:
         raw = str(self.config.get("owner_uids") or "1792559819")
         return {x.strip() for x in re.split(r"[,，\s]+", raw) if x.strip()}
@@ -1197,16 +1213,10 @@ class BiliBridge2(Star):
                 except Exception:  # noqa: BLE001
                     pass
                 if TextPart is None:
-                    # 极端兼容：没有 TextPart 时只能退回改写消息
-                    directive = (
-                        "（现在就去刷一轮 B 站：立刻调用你的 bili_watch_videos 工具，"
-                        "不要先问、不要解释、不要复述这句括号；刷完按你自己的口气回一句。）"
+                    # 没有 TextPart 就只记日志、不篡改用户消息
+                    logger.warning(
+                        "[Bridge2] TextPart 不可用，口令注入被跳过（不改写用户消息）"
                     )
-                    event.message_str = directive
-                    try:
-                        event.message_obj.message_str = directive
-                    except Exception:  # noqa: BLE001
-                        pass
                 logger.info("[Bridge2] 口令触发（附加内容注入指令）：%s", hit)
                 return
 

@@ -6,6 +6,13 @@
 > 桥2 **不自己刷 B站**：它读 B站 AI Bot 2.0 的 `bilibot.sqlite3`（旧版 `watch_log.json` 兼容），
 > 再用本机 **bili-cli** 补字幕细节。所以这两个前置必须先在。
 
+## 关于日记同步（1.4.1 起）
+
+- `diary_sync_enable` **默认关闭**：这是会执行外部 Python 脚本的功能，不该默认开着。
+- `diary_sync_script` / `diary_sync_log` 留空时用**插件数据目录**里的
+  `sync_qq_diary.py` / `qqdiary_sync.log`，不再指向作者本机路径。
+- 口令触发不再在「TextPart 不可用」时改写用户消息，只记一条警告。
+
 ## 前置插件
 
 | 插件 | 作用 | 仓库 |

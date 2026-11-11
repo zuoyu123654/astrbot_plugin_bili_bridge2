@@ -45,6 +45,8 @@ except Exception:  # noqa: BLE001
     TextPart = None  # type: ignore[assignment]
 
 PLUGIN_NAME = "astrbot_plugin_bili_bridge2"
+#: 和 metadata.yaml 的 version 必须一致，改版本时两处一起改
+PLUGIN_VERSION = "1.5.2"
 # QQ 日记 → B站 记忆的同步（AstrBot 启动后跑一次；脚本路径可以改）
 # 默认值不再指向作者本机路径：放到本插件自己的 plugin_data 里。
 # 真正的路径在运行时用 _diary_default_script() / _diary_default_log() 算。
@@ -101,7 +103,7 @@ CN_NUM = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, 
 DETAIL_Q_RE = re.compile(r"(再|具体|详细|展开|细说|多说|深入|后来|然后呢|为什么|怎么回事)")
 
 
-@register(PLUGIN_NAME, "paopao", "把 B站 AI Bot 刷到的视频接进 QQ", "1.4.0")
+@register(PLUGIN_NAME, "paopao", "把 B站 AI Bot 刷到的视频接进 QQ", PLUGIN_VERSION)
 class BiliBridge2(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context)
@@ -240,7 +242,15 @@ class BiliBridge2(Star):
         return str(self._plugin_data_dir() / DEFAULT_DIARY_LOG)
 
     def _owners(self) -> set[str]:
-        raw = str(self.config.get("owner_uids") or "1792559819")
+        raw = str(self.config.get("owner_uids") or "").strip()
+        if not raw:
+            if not getattr(self, "_owner_warned", False):
+                self._owner_warned = True
+                logger.warning(
+                    "[Bridge2] 还没填 owner_uids —— 主人的 QQ 号是必填项，"
+                    "不填的话所有私聊指令都不会响应"
+                )
+            return set()
         return {x.strip() for x in re.split(r"[,，\s]+", raw) if x.strip()}
 
     def _is_owner(self, event: AstrMessageEvent) -> bool:

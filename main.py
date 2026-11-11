@@ -1069,6 +1069,78 @@ class BiliBridge2(Star):
             return []
         return [str(b) for b in (data.get("bvids") or []) if b]
 
+    def _recommend_ledger(self) -> dict:
+        """推荐账本：bvid -> {time, title, ...}。2.0+ 在数据库，老版本在 json。"""
+
+        db = self._ai_bot_db()
+        if db.is_file():
+            try:
+                con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
+                row = con.execute(
+                    "select data from keyed_json where kind='state' "
+                    "and key='owner_recommend_log.json' order by id desc limit 1").fetchone()
+                con.close()
+                ledger = json.loads(row[0]) if row and row[0] else {}
+                if isinstance(ledger, dict):
+                    return ledger
+            except Exception:  # noqa: BLE001
+                pass
+
+        path = self._ai_bot_dir() / "owner_recommend_log.json"
+        if not path.is_file():
+            return {}
+        try:
+            data = json.loads(path.read_bytes().decode("utf-8-sig"))
+        except Exception:  # noqa: BLE001
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    @staticmethod
+    def _parse_ts(text: str) -> float:
+        raw = str(text or "").strip()
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+            try:
+                return datetime.strptime(raw, fmt).timestamp()
+            except Exception:  # noqa: BLE001
+                continue
+        return 0.0
+
+    def _push_history(self, days: int = 7) -> list[dict]:
+        """近 N 天推给主人的视频，按时间倒序，带标题。
+
+        用户问「你推过什么 / 上周发给我哪些」时走这里，不从记忆检索。
+        """
+
+        ledger = self._recommend_ledger()
+        if not ledger:
+            return []
+        try:
+            span = max(1, int(days))
+        except (TypeError, ValueError):
+            span = 7
+        cutoff = time.time() - span * 86400
+        titles = {}
+        try:
+            titles = {r["bvid"]: r.get("title") or "" for r in self._watch_records() if r.get("bvid")}
+        except Exception:  # noqa: BLE001
+            pass
+        out = []
+        for bvid, item in ledger.items():
+            if not bvid or not isinstance(item, dict):
+                continue
+            when = str(item.get("time") or "")
+            ts = BiliBridge2._parse_ts(when)
+            if ts and ts < cutoff:
+                continue
+            out.append({
+                "bvid": str(bvid),
+                "time": when,
+                "title": str(item.get("title") or titles.get(bvid) or ""),
+                "up": str(item.get("up") or ""),
+            })
+        out.sort(key=lambda r: r["time"], reverse=True)
+        return out
+
     def _pushed_records(self) -> list[dict]:
         """最近一次推给主人的那一批，按 QQ 消息里的顺序。"""
 
@@ -1798,6 +1870,26 @@ class BiliBridge2(Star):
 
     # ── 素材注入（只加临时附加内容，不动 system_prompt）─────────────────
     @filter.on_llm_request()
+    @staticmethod
+    def _temp_part(text: str):
+        """把一段文字包成临时 content part：用完就丢，不落进历史上下文。
+
+        所有「后台资料」注入都走这里，别直接 append 裸 TextPart——
+        裸 part 会被 AstrBot 当正式用户内容存进历史，下一轮还在，越滚越长。
+        """
+        part = TextPart(text=text)
+        for attr in ("mark_as_temp", "make_as_temp"):
+            marker = getattr(part, attr, None)
+            if callable(marker):
+                try:
+                    marked = marker()
+                    if marked is not None:
+                        part = marked
+                except Exception:  # noqa: BLE001
+                    pass
+                break
+        return part
+
     async def inject_material(self, event: AstrMessageEvent, req: ProviderRequest):
         origin = getattr(event, "unified_msg_origin", "") or ""
         # 老大分享过来、刚刚真看完的视频：让她能主动接一句「我看完了」
@@ -1806,11 +1898,11 @@ class BiliBridge2(Star):
             self._share_done = None
             if TextPart is not None:
                 try:
-                    req.extra_user_content_parts.append(TextPart(text=(
+                    req.extra_user_content_parts.append(self._temp_part(
                         "（补充：你刚把老大分享的那个视频真看完了，下面是你的看片记录。"
                         "可以自然地说一句你看到了什么，不要整段复述，"
                         "也不要把「已完成视频分析」这类字样说出来）\n" + done[2]
-                    )))
+                    ))
                     logger.info("[Bridge2] 已注入真看结果：%s", done[1])
                 except Exception:  # noqa: BLE001
                     pass
@@ -1831,18 +1923,7 @@ class BiliBridge2(Star):
             logger.info("[Bridge2] 没有 TextPart，跳过注入（仍可用 bili_bridge2_read 工具）")
             return
         try:
-            part = TextPart(text=material)
-            for attr in ("mark_as_temp", "make_as_temp"):
-                marker = getattr(part, attr, None)
-                if callable(marker):
-                    try:
-                        marked = marker()
-                        if marked is not None:
-                            part = marked
-                    except Exception:  # noqa: BLE001
-                        pass
-                    break
-            req.extra_user_content_parts.append(part)
+            req.extra_user_content_parts.append(self._temp_part(material))
             logger.info("[Bridge2] 已注入素材（%s 字）", len(material))
         except Exception as exc:  # noqa: BLE001
             logger.warning("[Bridge2] 注入失败：%s", exc)

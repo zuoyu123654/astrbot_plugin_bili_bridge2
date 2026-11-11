@@ -1,8 +1,9 @@
 {
   "owner_uids": {
-    "description": "允许触发的 QQ 号（英文逗号分隔）",
+    "description": "主人的 QQ 号（必填，逗号分隔可填多个）",
     "type": "string",
-    "default": "1792559819"
+    "default": "",
+    "hint": "必填。留空时插件不会响应任何私聊指令，日志里会提示一次。不填就等于谁都不是主人。"
   },
   "bili_executable": {
     "description": "bili-cli 可执行文件（PATH 里有就写 bili）",

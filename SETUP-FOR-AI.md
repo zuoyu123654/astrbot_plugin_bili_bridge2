@@ -110,7 +110,7 @@ git clone https://github.com/zuoyu123654/astrbot_plugin_bili_bridge2.git
 
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
-| `owner_uids` | 1792559819 | 允许触发的 QQ 号，多个用英文逗号。**必须填对**，否则插件不响应 |
+| `owner_uids` | 空（**必填**） | 允许触发的 QQ 号，多个用英文逗号。**必须填对**，否则插件不响应任何私聊指令；留空时日志会提示一次「必填」 |
 | `bili_executable` | `bili` | bili-cli 可执行文件；PATH 里没有就写绝对路径 |
 | `ai_bot_data_dir` | 空 | B站 AI Bot 数据目录，留空自动找 |
 | `recent_limit` / `recent_limit_min` | 10 / 5 | 清单条数在 min~max 之间随机 |
@@ -223,17 +223,17 @@ AstrBot 启动 → 等 diary_sync_delay_minutes（默认 3 分钟）→ 跑 sync
 | --- | --- | --- |
 | `diary_sync_enable` | true | 关掉就不排队 |
 | `diary_sync_delay_minutes` | 3 | 给陪伴插件补写留的时间 |
-| `diary_sync_script` | `D:\app1\tools\sync_qq_diary.py` | 同步脚本 |
+| `diary_sync_script` | 空（= 插件数据目录里的 `sync_qq_diary.py`） | 只有想换成别的脚本时才填 |
 | `diary_sync_python` | 空 | 留空用 AstrBot 自己的解释器 |
 | `diary_sync_extra_args` | `--no-wait` | 启动这次不空等；每日 00:05 的计划任务才等日记 |
-| `diary_sync_log` | `D:\app1\logs\qqdiary_sync.log` | 脚本输出追加到这里 |
+| `diary_sync_log` | 空（= 插件数据目录里的 `qqdiary_sync.log`） | 脚本输出追加到这里 |
 
 日志里应有：
 
 ```
-[Bridge2] 日记同步已排队：AstrBot 启动后 3 分钟跑一次（D:\app1\tools\sync_qq_diary.py）
-[Bridge2] 日记同步已在后台跑（startup）：...python.exe -u D:\app1\tools\sync_qq_diary.py --no-wait
-[Bridge2] 同步结果看 D:\app1\logs\qqdiary_sync.log（写到最后一行就是这次的结论）
+[Bridge2] 日记同步已排队：AstrBot 启动后 3 分钟跑一次（<插件数据目录>\sync_qq_diary.py）
+[Bridge2] 日记同步已在后台跑（startup）：...python.exe -u <插件数据目录>\sync_qq_diary.py --no-wait
+[Bridge2] 同步结果看 <插件数据目录>\qqdiary_sync.log（写到最后一行就是这次的结论）
 ```
 
 **结论看日志文件，不看 AstrBot 日志**：脚本是后台进程，输出直接追加进

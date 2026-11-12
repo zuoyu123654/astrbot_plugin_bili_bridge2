@@ -219,9 +219,14 @@ AstrBot 启动 → 等 diary_sync_delay_minutes（默认 3 分钟）→ 跑 sync
 
 配置（面板 → 桥2 配置）：
 
+> ⚠️ **`diary_sync_script` 会执行外部 Python 脚本**，等于把执行权交给你填的那个文件。
+> 只指向**你自己写的、看得懂的、放在本机的**脚本。不要填网上下载的、别人发来的、
+> 或者会随内容变化的路径。默认空着 = 用插件数据目录里自带的 `sync_qq_diary.py`，这是最安全的用法。
+> 这个功能默认关闭（`diary_sync_enable=false`），要用才开。
+
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
-| `diary_sync_enable` | true | 关掉就不排队 |
+| `diary_sync_enable` | false | 关掉就不排队；要用日记同步才开 |
 | `diary_sync_delay_minutes` | 3 | 给陪伴插件补写留的时间 |
 | `diary_sync_script` | 空（= 插件数据目录里的 `sync_qq_diary.py`） | 只有想换成别的脚本时才填 |
 | `diary_sync_python` | 空 | 留空用 AstrBot 自己的解释器 |

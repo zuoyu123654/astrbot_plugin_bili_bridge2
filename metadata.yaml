@@ -2,7 +2,7 @@ name: astrbot_plugin_bili_bridge2
 display_name: B站动态记忆桥2
 short_desc: 读 B站 AI Bot 的看片记录，把 B站 接进 QQ；在 QQ 分享视频会让她真的看一遍。
 desc: 分享卡片解析、最近刷片清单、按片名问细节、口令触发刷一轮；在 QQ 分享 B站 视频（卡片 / 短链 / 完整链接 / av 号）会让她后台真看一遍并写进记忆；AstrBot 启动后自动把 QQ 日记同步进 B站 记忆；数据源是 B站 AI Bot 的 bilibot.sqlite3（旧版 watch_log.json 兼容）。
-version: 1.5.2
+version: 1.5.3
 author: paopao
 repo: https://github.com/zuoyu123654/astrbot_plugin_bili_bridge2
 astrbot_version: ">=4.17"

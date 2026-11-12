@@ -44,7 +44,7 @@
 - 新增配置：`diary_sync_enable` / `diary_sync_delay_minutes` / `diary_sync_script` /
   `diary_sync_python` / `diary_sync_extra_args`（默认 `--no-wait`）/ `diary_sync_timeout` / `diary_sync_log`。
 - 手动补一次：私聊发 `/diary_sync`。
-- 日志：AstrBot 日志有 `[Bridge2] 日记同步完成（exit=0）`，脚本自己的输出追加到 `D:\app1\logs\qqdiary_sync.log`。
+- 日志：AstrBot 日志有 `[Bridge2] 日记同步完成（exit=0）`，脚本自己的输出追加到插件数据目录里的 `qqdiary_sync.log`。
 - 为什么并进来：日记补写和同步都得等 AstrBot 起来才有意义，跟着桥2 的生命周期走最省事，
   也少一个要单独装的插件。
 

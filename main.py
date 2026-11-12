@@ -46,7 +46,7 @@ except Exception:  # noqa: BLE001
 
 PLUGIN_NAME = "astrbot_plugin_bili_bridge2"
 #: 和 metadata.yaml 的 version 必须一致，改版本时两处一起改
-PLUGIN_VERSION = "1.5.2"
+PLUGIN_VERSION = "1.5.3"
 # QQ 日记 → B站 记忆的同步（AstrBot 启动后跑一次；脚本路径可以改）
 # 默认值不再指向作者本机路径：放到本插件自己的 plugin_data 里。
 # 真正的路径在运行时用 _diary_default_script() / _diary_default_log() 算。

@@ -46,7 +46,7 @@ except Exception:  # noqa: BLE001
 
 PLUGIN_NAME = "astrbot_plugin_bili_bridge2"
 #: 和 metadata.yaml 的 version 必须一致，改版本时两处一起改
-PLUGIN_VERSION = "1.5.4"
+PLUGIN_VERSION = "1.5.5"
 # QQ 日记 → B站 记忆的同步（AstrBot 启动后跑一次；脚本路径可以改）
 # 默认值不再指向作者本机路径：放到本插件自己的 plugin_data 里。
 # 真正的路径在运行时用 _diary_default_script() / _diary_default_log() 算。
@@ -223,18 +223,16 @@ class BiliBridge2(Star):
     async def diary_sync_command(self, event: AstrMessageEvent):
         """手动补一次 QQ 日记 → B站 同步（等同等 AstrBot 启动后自动跑的那次）。"""
 
+        if not self._is_owner(event):
+            logger.warning(
+                "[Bridge2] 非主人触发了 /diary_sync，已忽略：%s",
+                str(getattr(event, "get_sender_id", lambda: "")() or "?"),
+            )
+            return
         result = await self._run_diary_sync("manual")
         yield event.plain_result(f"日记同步：{result}")
 
     # ── 配置/工具 ────────────────────────────────────────────────────────
-    def _plugin_data_dir(self) -> Path:
-        """本插件自己的数据目录（拿不到就退回插件目录）。"""
-
-        try:
-            return Path(StarTools.get_data_dir(PLUGIN_NAME))
-        except Exception:  # noqa: BLE001
-            return Path(__file__).resolve().parent / "data"
-
     def _diary_default_script(self) -> str:
         return str(self._plugin_data_dir() / DEFAULT_DIARY_SCRIPT)
 
@@ -1879,7 +1877,6 @@ class BiliBridge2(Star):
             logger.info("[Bridge2] 注入刷片近况失败：%s", exc)
 
     # ── 素材注入（只加临时附加内容，不动 system_prompt）─────────────────
-    @filter.on_llm_request()
     @staticmethod
     def _temp_part(text: str):
         """把一段文字包成临时 content part：用完就丢，不落进历史上下文。
@@ -1900,6 +1897,7 @@ class BiliBridge2(Star):
                 break
         return part
 
+    @filter.on_llm_request()
     async def inject_material(self, event: AstrMessageEvent, req: ProviderRequest):
         origin = getattr(event, "unified_msg_origin", "") or ""
         # 老大分享过来、刚刚真看完的视频：让她能主动接一句「我看完了」

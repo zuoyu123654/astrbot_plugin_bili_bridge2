@@ -46,7 +46,7 @@ except Exception:  # noqa: BLE001
 
 PLUGIN_NAME = "astrbot_plugin_bili_bridge2"
 #: 和 metadata.yaml 的 version 必须一致，改版本时两处一起改
-PLUGIN_VERSION = "1.5.5"
+PLUGIN_VERSION = "1.6.0"
 # QQ 日记 → B站 记忆的同步（AstrBot 启动后跑一次；脚本路径可以改）
 # 默认值不再指向作者本机路径：放到本插件自己的 plugin_data 里。
 # 真正的路径在运行时用 _diary_default_script() / _diary_default_log() 算。
@@ -692,15 +692,119 @@ class BiliBridge2(Star):
     async def _fetch_material(self, bvid: str) -> str:
         info = await self._bili("video", "info", bvid)
         subtitle = await self._bili("video", "subtitle", bvid)
-        if "[bili-cli" in subtitle or len(subtitle.strip()) < 20:
+        has_subtitle = not ("[bili-cli" in subtitle or len(subtitle.strip()) < 20)
+        if not has_subtitle:
             subtitle = await self._bili("video", "summary", bvid)
         cap = int(self.config.get("subtitle_max_chars") or 1800)
+        visual = await self._analyze_frames(bvid, has_subtitle=has_subtitle)
         return (
             f"【B站视频素材 {bvid}】\n"
             f"— 基本信息 —\n{info.strip()[:1200]}\n"
             f"— 内容（字幕/官方总结）—\n{subtitle.strip()[:cap]}\n"
+            f"{visual}"
             "用法：保持人设用你自己的话说，别复述标题、别写成评测稿。"
         )
+
+    # ── 抽帧看图 ────────────────────────────────────────────────────────
+    async def _analyze_frames(self, bvid: str, *, has_subtitle: bool) -> str:
+        """抽几帧画面让模型看：有字幕时少抽（字幕已经讲清楚），没字幕多抽。
+
+        走 ``bili video frames``，不自己下视频；失败一律返回空串，不影响主流程。
+        """
+
+        if not bool(self.config.get("enable_frame_analysis", True)):
+            return ""
+        key = (
+            "frame_count_with_subtitle"
+            if has_subtitle
+            else "frame_count_without_subtitle"
+        )
+        try:
+            count = int(self.config.get(key) or (5 if has_subtitle else 12))
+        except (TypeError, ValueError):
+            count = 5 if has_subtitle else 12
+        count = max(1, min(24, count))
+        out_dir = self._plugin_data_dir() / "frames" / bvid
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[Bridge2] 建帧目录失败：%s", exc)
+            return ""
+        quality = str(self.config.get("frame_quality") or "preview").strip() or "preview"
+        raw = await self._bili(
+            "video",
+            "frames",
+            bvid,
+            "--count",
+            str(count),
+            "--quality",
+            quality,
+            "--out",
+            str(out_dir),
+            timeout=180,
+        )
+        frames = self._parse_frames(raw)
+        if not frames:
+            logger.info("[Bridge2] %s 没抽到帧，跳过画面分析", bvid)
+            return ""
+        return await self._vision_describe(bvid, frames)
+
+    @staticmethod
+    def _parse_frames(raw: str) -> list[dict]:
+        """从 bili-cli 的 JSON 里挑出真正存在的帧图片。"""
+
+        try:
+            data = json.loads(raw)
+        except Exception:  # noqa: BLE001
+            return []
+        items = ((data or {}).get("data") or {}).get("frames") or []
+        out: list[dict] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            path = str(item.get("path") or "").strip()
+            if not path or not Path(path).is_file():
+                continue
+            out.append({"path": path, "time_str": str(item.get("time_str") or "")})
+        return out
+
+    async def _vision_describe(self, bvid: str, frames: list[dict]) -> str:
+        """把帧丢给支持看图的模型，拿回一段画面描述。"""
+
+        try:
+            pid = str(self.config.get("frame_provider_id") or "").strip()
+            provider = None
+            if pid:
+                provider = await self.context.provider_manager.get_provider_by_id(pid)
+            if provider is None:
+                provider = await self.context.get_using_provider_async()
+            if provider is None:
+                logger.info("[Bridge2] 没有可用的看图模型，跳过画面分析")
+                return ""
+            listing = "\n".join(
+                f"- 第 {i + 1} 帧（{f['time_str'] or '时间未知'}）"
+                for i, f in enumerate(frames)
+            )
+            prompt = (
+                "这是同一个 B站 视频按时间顺序抽出的几帧画面，请按顺序描述：\n"
+                "1. 每个画面里在发生什么、出现了谁或什么东西；\n"
+                "2. 场景在哪（室内/室外/手机录屏/动画等）；\n"
+                "3. 能看清的文字、标题、字幕就写出来，看不清就说看不清。\n"
+                "只描述你真看到的，不要猜剧情，不要评论。\n\n"
+                f"帧列表：\n{listing}"
+            )
+            resp = await provider.text_chat(
+                prompt=prompt,
+                image_urls=[f["path"] for f in frames],
+            )
+            text = str(getattr(resp, "completion_text", "") or "").strip()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[Bridge2] 抽帧分析失败：%s", exc)
+            return ""
+        if not text:
+            return ""
+        logger.info("[Bridge2] %s 画面分析完成（%d 帧，%d 字）", bvid, len(frames), len(text))
+        return f"— 画面（自动抽帧 {len(frames)} 帧）—\n{text[:1500]}\n"
 
     @staticmethod
     def _walk_strings(obj, out: list[str], depth: int = 0) -> None:

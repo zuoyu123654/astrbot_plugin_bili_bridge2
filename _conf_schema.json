@@ -30,6 +30,37 @@
     "type": "int",
     "default": 1800
   },
+  "enable_frame_analysis": {
+    "description": "分享视频时抽帧看画面",
+    "type": "bool",
+    "default": true,
+    "hint": "开启后用 bili video frames 抽几帧交给看图模型，画面和字幕互补。会让一次分享多花一点 token。"
+  },
+  "frame_count_with_subtitle": {
+    "description": "有字幕时抽几帧",
+    "type": "int",
+    "default": 5,
+    "hint": "字幕已经把内容讲清楚了，抽几张确认画面即可。1~24。"
+  },
+  "frame_count_without_subtitle": {
+    "description": "没字幕时抽几帧",
+    "type": "int",
+    "default": 12,
+    "hint": "没字幕只能靠画面，多抽一些才看得明白。1~24。"
+  },
+  "frame_quality": {
+    "description": "抽帧清晰度",
+    "type": "string",
+    "default": "preview",
+    "options": ["preview", "hd"],
+    "hint": "preview = B站预览图（480 宽，快、省）；hd = ffmpeg 精确取帧 720p（慢、费流量）。"
+  },
+  "frame_provider_id": {
+    "description": "看图用哪个模型",
+    "type": "string",
+    "default": "",
+    "hint": "留空 = 用当前默认聊天模型（deepseek-chat 本身就能看图）。填了就用指定 provider。"
+  },
   "command_timeout": {
     "description": "单条 bili 命令超时（秒）",
     "type": "int",
